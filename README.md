@@ -90,7 +90,7 @@ Errors, on stderr, from slicc 6 where they still apply:
 | `screencapture: -R: rectangle outside the capture` (the page's message) | 1 |
 | `screencapture: <message>` (any other error of the page, `EIO` or `ENOENT`: the first line of its message, else the errno's text, such as `I/O error`) | 1 |
 | `screencapture: the page sent no image` (an empty reply) | 1 |
-| `screencapture: interrupted` (a signal ended the request; the exit status is the reader's, `128 + n`) | `128 + n` |
+| `screencapture: interrupted` (`SIGHUP`, `SIGINT` or `SIGTERM` during the request: the command stops the reader, so the page's `signal` aborts with `interrupted`, removes its temporary files and writes no file) | `128 + n` |
 | `screencapture: failed to write file: <file>: <message>` | 1 |
 | `screencapture: failed to copy to clipboard: this page does not copy images (no clipboard.write)` (`ENOTSUP`: no page answers `clipboard.write`) | 1 |
 | `screencapture: failed to copy to clipboard: <message>` (the page's message, else the errno's text) | 1 |
@@ -107,7 +107,7 @@ As `sccapture`, the messages start with `sccapture:`. A line of progress from th
 
 The commands run in a kernel worker, which has no `getDisplayMedia`, so they ask seven's page over [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder) (slicc-kernel 1.153.0, [#1527](https://github.com/ai-ecoverse/slicc-kernel/issues/1527)): one open file description per request, a JSON header line `{ kind, …options }`, then the body, and the reply read to end-of-file. The page side, the prompt, `getDisplayMedia`, the frame, the crop and the encoding, is a page module that slicc-bios registers for `capture.screen` and wraps with its own prompt, user activation, `selfBrowserSurface: 'exclude'` and a check of the picked surface against protected origins; it answers this contract:
 
-- **`capture.screen`:** the header is plain JSON, with no body, and the reply is the encoded image's bytes, nothing else. The command opens the device read-write (`exec 3<>/dev/embedder`), writes the header from a child `sh` that stays until the reply is read (so the page's progress reaches stderr), and reads the reply with `cat <&3`.
+- **`capture.screen`:** the header is plain JSON, with no body, and the reply is the encoded image's bytes, nothing else. The command opens the device read-write (`exec 3<>/dev/embedder`), writes the header from a child `sh` that stays until the reply is read (so the page's progress reaches stderr), and reads the reply with a `cat <&3` that it starts in the background, so that a signal to the command can stop it.
 
 | header field | value | from |
 | --- | --- | --- |

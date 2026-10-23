@@ -15,13 +15,6 @@ function refusal(name, message) {
 const quiet = { kinds: {}, handle: () => undefined };
 let os;
 
-async function children(pid) {
-  const found = await os.sh(
-    `for s in /proc/[0-9]*/stat; do read -r l <"$s"; case $l in *") S ${pid} "*) echo "\${l%% *}";; esac; done`
-  );
-  return found.stdout.split('\n').filter(Boolean);
-}
-
 const requests = {
   kinds: { 'capture.screen': {}, 'clipboard.write': {} },
   async handle({ kind, options, body, stamp, signal, progress }) {
@@ -99,6 +92,7 @@ describe('on the kernel', () => {
       ['-T 1 -T 2', { delay: 2 }],
       ['-R 0,0,800,600', { rect: { x: 0, y: 0, width: 800, height: 600 } }],
       ['-R10,020,3,4', { rect: { x: 10, y: 20, width: 3, height: 4 } }],
+      ['-R 0,0,08,010', { rect: { x: 0, y: 0, width: 8, height: 10 } }],
       ['-a -d -i -o -r -x', {}],
       ['-adiorx', {}],
       ['-xCm', { cursor: 'always', surface: 'monitor' }],
@@ -203,6 +197,7 @@ describe('on the kernel', () => {
       ['-R 1,2,3,4,5', '-R: invalid rectangle: 1,2,3,4,5'],
       ['-R 1,2,0,4', '-R: invalid rectangle: 1,2,0,4'],
       ['-R 1,2,3,0', '-R: invalid rectangle: 1,2,3,0'],
+      ['-R 1,2,00,4', '-R: invalid rectangle: 1,2,00,4'],
       ['-R a,2,3,4', '-R: invalid rectangle: a,2,3,4'],
       ['-R 1,,3,4', '-R: invalid rectangle: 1,,3,4'],
       ['-D 0', '-D: invalid display: 0'],
@@ -341,24 +336,45 @@ describe('on the kernel', () => {
     });
   });
 
-  it('stops on a signal, as EINTR, and aborts the request', async () => {
+  it('stops on an interrupt, and aborts the request', async () => {
     let reason;
-    page.screen = ({ call, signal }) =>
+    page.screen = ({ signal }) =>
       new Promise((resolve) => {
         signal.addEventListener('abort', () => {
           reason = String(signal.reason?.message ?? signal.reason);
           resolve(image);
         });
         setTimeout(async () => {
-          for (const pid of await children(call.stamp.pid)) await os.sh(`kill -INT ${pid}`);
+          await os.sh('kill -INT "$(cat /tmp/main)"');
         }, 200);
       });
     const result = await sh(
-      'rm -f f.png; screencapture f.png; echo "$?"; test -e f.png || echo none'
+      'rm -f f.png; sh -c \'echo $$ >/tmp/main; exec screencapture f.png\'; echo "$?"; test -e f.png || echo none'
     );
     assert.deepEqual(result, {
       status: 0,
       stdout: '130\nnone\n',
+      stderr: 'screencapture: interrupted\n',
+    });
+    assert.equal(reason, 'interrupted');
+  });
+
+  it('stops on a signal to the command itself, and cleans up', async () => {
+    let reason;
+    page.screen = ({ signal }) =>
+      new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          reason = String(signal.reason?.message ?? signal.reason);
+          resolve(image);
+        });
+        setTimeout(() => os.sh('kill -TERM "$(cat /tmp/main)"'), 200);
+      });
+    const result = await sh(
+      'rm -rf f.png /tmp/tmp.*; screencapture f.png & echo $! >/tmp/main; wait $!; echo "$?"; test -e f.png || echo none; ls -d /tmp/tmp.* 2>/dev/null; true'
+    );
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: '143\nnone\n',
       stderr: 'screencapture: interrupted\n',
     });
     assert.equal(reason, 'interrupted');
@@ -442,6 +458,14 @@ describe('on the kernel', () => {
     assert.equal(absolute.stdout, '<img:/tmp/v/a.png>\n');
     const dot = await sh('cd /tmp/v && screencapture -v ./b.png');
     assert.equal(dot.stdout, '<img:/tmp/v/b.png>\n');
+    const up = await sh('mkdir -p /tmp/v/d && cd /tmp/v && screencapture -v d/../c.png');
+    assert.equal(up.stdout, '<img:/tmp/v/c.png>\n');
+    const top = await sh(
+      'cd / && screencapture -v tmp/v/e.png && screencapture -v /tmp/../tmp/v/e.png'
+    );
+    assert.equal(top.stdout, '<img:/tmp/v/e.png>\n<img:/tmp/v/e.png>\n');
+    const root = await sh('cd / && screencapture -v f.png && rm /f.png');
+    assert.equal(root.stdout, '<img:/f.png>\n');
     const bare = await sh('screencapture -v');
     const path = /^<img:(\/tmp\/screencapture-\w+\.png)>\n$/.exec(bare.stdout)?.[1];
     assert.ok(path, bare.stdout);

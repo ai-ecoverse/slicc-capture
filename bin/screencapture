@@ -56,12 +56,7 @@ rect() {
   rw=${rest%%,*}
   rh=${rest#*,}
   digits "$rx" && digits "$ry" && digits "$rw" && digits "$rh" || return 1
-  case $rw in
-    0*) return 1 ;;
-  esac
-  case $rh in
-    0*) return 1 ;;
-  esac
+  [ "$(num "$rw")" != 0 ] && [ "$(num "$rh")" != 0 ]
 }
 format() {
   case $1 in
@@ -126,14 +121,14 @@ relay() {
       *": $dev: "*) printf '%s\n' "${line#*": $dev: "}" >"$work/message" ;;
       *": printf: write error: "*) printf '%s\n' "${line##*: }" >"$work/header" ;;
       "cat: -: "* | "cat: write error: "*) printf '%s\n' "${line##*: }" >"$work/errno" ;;
-      "status "*) printf '%s\n' "${line#status }" >"$work/status" ;;
       *) printf '%s: %s\n' "$me" "${line#*: }" >&2 ;;
     esac
   done
 }
 ask() {
-  rm -f "$work/message" "$work/header" "$work/errno" "$work/status"
-  { { "$@" || echo "status $?" >&2; } 2>&1 >&5 | relay; } 5>&1
+  rm -f "$work/message" "$work/header" "$work/errno"
+  { { "$@"; } 2>&1 >&5 | relay; } 5>&1 &
+  wait "$!"
   header=
   errno=
   message=
@@ -141,10 +136,6 @@ ask() {
   [ ! -f "$work/errno" ] || errno=$(cat "$work/errno")
   [ ! -f "$work/message" ] || message=$(cat "$work/message")
   errno=${errno:-$header}
-  if [ -f "$work/status" ] && [ -z "$errno" ]; then
-    say interrupted
-    exit "$(cat "$work/status")"
-  fi
   [ -z "$errno" ]
 }
 because() {
@@ -155,6 +146,20 @@ copyfail() {
     "Not supported") die "failed to copy to clipboard: this page does not copy images (no clipboard.write)" ;;
   esac
   die "failed to copy to clipboard: $(because)"
+}
+stop() {
+  [ ! -s "$work/pid" ] || kill -TERM "$(cat "$work/pid")" 2>/dev/null
+  wait
+  say interrupted
+  exit $((128 + $1))
+}
+absolute() {
+  case $1 in
+    */*) dir=${1%/*} base=${1##*/} ;;
+    *) dir=. base=$1 ;;
+  esac
+  dir=$(cd -- "${dir:-/}" && pwd)
+  printf '%s/%s' "${dir%/}" "$base"
 }
 cleanup() {
   rm -rf "$work"
@@ -265,12 +270,15 @@ request="$request,\"cursor\":\"$cursor\""
 request="$request}"
 work=$(mktemp -d)
 trap cleanup EXIT
+trap 'stop 1' HUP
+trap 'stop 2' INT
+trap 'stop 15' TERM
 if [ -n "$clip" ]; then
   exec 4<>"$dev"
   ask sh -c "printf '%s\\n' \"\$1\" >&4" sh '{"kind":"clipboard.write","type":"image/png"}' || copyfail
 fi
 exec 3<>"$dev"
-if ! ask sh -c "printf '%s\\n' \"\$1\" >&3 || exit 1; cat <&3" sh "$request" >"$work/image"; then
+if ! ask sh -c "printf '%s\\n' \"\$1\" >&3 || exit 1; cat <&3 & echo \$! >\"\$2\"; wait \$!" sh "$request" "$work/pid" >"$work/image"; then
   case $header in
     "Not supported") die "browser APIs are unavailable in this environment" ;;
   esac
@@ -286,7 +294,7 @@ size=$(wc -c <"$work/image")
 kb=$(((size + 512) / 1024))
 if [ -n "$clip" ]; then
   ask cat "$work/image" >&4 || copyfail
-  ask cat <&4 >/dev/null || copyfail
+  ask sh -c 'cat <&4' >/dev/null || copyfail
   exec 4<&-
   printf 'captured %s KB to clipboard\n' "$kb"
 fi
@@ -296,11 +304,7 @@ if [ -z "$file" ]; then
 fi
 err=$(tee -- "$file" <"$work/image" 2>&1 >/dev/null) || die "failed to write file: ${err#tee: }"
 if [ -n "$view" ]; then
-  case $file in
-    /*) ;;
-    *) file=$PWD/${file#./} ;;
-  esac
-  printf '<img:%s>\n' "$file"
+  printf '<img:%s>\n' "$(absolute "$file")"
 elif [ -z "$clip" ]; then
   printf 'captured %s KB to %s\n' "$kb" "$file"
 fi
