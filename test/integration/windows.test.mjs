@@ -456,7 +456,10 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
       assert.ok(shot.size > 100, `${how}: ${JSON.stringify(shot)}`);
       assert.equal(statSync(whole).size, shot.size);
       const part = join(work, `${how} part.png`);
-      const cut = await shoot(part, how === 'cmd' ? '-C -R 0,0,64,32' : "-C -R '0,0,64,32'");
+      const cut = await shoot(
+        part,
+        how.startsWith('cmd') ? '-C -R 0,0,64,32' : "-C -R '0,0,64,32'"
+      );
       assert.equal(cut.status, 0, `${how}: ${cut.stderr}`);
       const piece = png(part);
       assert.deepEqual([piece.width, piece.height], [64, 32], how);
