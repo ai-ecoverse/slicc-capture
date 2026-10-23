@@ -254,6 +254,41 @@ describe('the page module', () => {
     assert.equal(state.frames.length, 0);
   });
 
+  it('closes the frame that arrives after the command was interrupted in grabFrame', async () => {
+    const state = setup();
+    const { ImageCapture } = state.env;
+    let arrived;
+    const late = new Promise((resolve) => {
+      arrived = resolve;
+    });
+    state.page = create({
+      ...state.env,
+      ImageCapture: class extends ImageCapture {
+        grabFrame() {
+          setTimeout(() => os.sh('kill -INT "$(cat /tmp/main)"'), 200);
+          return new Promise((resolve) => {
+            state.signal.addEventListener('abort', () => {
+              setTimeout(async () => {
+                resolve(await super.grabFrame());
+                setTimeout(arrived, 50);
+              }, 50);
+            });
+          });
+        }
+      },
+    });
+    const result = await sh(
+      'rm -f f.png; sh -c \'echo $$ >/tmp/main; exec screencapture f.png\'; echo "$?"; test -e f.png || echo none'
+    );
+    assert.equal(result.stdout, '130\nnone\n');
+    await late;
+    assert.deepEqual(stopped(state), [1, 1]);
+    assert.deepEqual(
+      state.frames.map((frame) => frame.closed),
+      [1]
+    );
+  });
+
   it('stops when the user ends the share during the delay', async () => {
     const state = setup();
     const display = state.display;

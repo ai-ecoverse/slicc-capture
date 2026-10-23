@@ -93,7 +93,17 @@ async function pick(display, constraints, signal, timeout) {
 async function grab(stream, track, env, signal) {
   const ImageCapture = env('ImageCapture');
   if (ImageCapture) {
-    const bitmap = await race(new ImageCapture(track).grabFrame(), signal);
+    const pending = Promise.resolve(new ImageCapture(track).grabFrame());
+    let bitmap;
+    try {
+      bitmap = await race(pending, signal);
+    } catch (error) {
+      pending.then(
+        (late) => late?.close?.(),
+        () => {}
+      );
+      throw error;
+    }
     return {
       source: bitmap,
       width: bitmap.width,
