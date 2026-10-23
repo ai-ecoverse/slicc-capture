@@ -1,0 +1,87 @@
+import { spawn } from 'node:child_process';
+import { accessSync, constants, statSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
+
+export function say(fd, text) {
+  writeSync(fd, text);
+}
+
+function runnable(path, platform) {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, platform === 'win32' ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function dirs(platform, env) {
+  const path = (platform === 'win32' ? (env.PATH ?? env.Path) : env.PATH) ?? '';
+  return path.split(platform === 'win32' ? ';' : ':').filter(Boolean);
+}
+
+export function lookup(file, platform, env) {
+  for (const dir of dirs(platform, env)) {
+    if (runnable(join(dir, file), platform)) return join(dir, file);
+  }
+  return undefined;
+}
+
+export function spawned(path, args, { env, stdin = 'ignore', capture = false }) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(path, args, {
+        env,
+        stdio: [stdin, capture ? 'pipe' : 'ignore', 'pipe'],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({ error });
+      return;
+    }
+    const out = [];
+    const errors = [];
+    let code;
+    let outClosed = !capture;
+    let errClosed = false;
+    const settle = () => {
+      if (code === undefined || !outClosed) return;
+      if (code === 0) {
+        child.stderr.destroy();
+        resolve({ code, stdout: Buffer.concat(out).toString('utf8') });
+      } else if (errClosed) resolve({ code, stderr: Buffer.concat(errors) });
+    };
+    if (capture) {
+      child.stdout.on('data', (chunk) => out.push(chunk));
+      child.stdout.on('close', () => {
+        outClosed = true;
+        settle();
+      });
+    }
+    child.stderr.on('data', (chunk) => errors.push(chunk));
+    child.stderr.on('close', () => {
+      errClosed = true;
+      settle();
+    });
+    child.on('error', (error) => resolve({ error }));
+    child.on('exit', (status) => {
+      code = status ?? 1;
+      settle();
+    });
+  });
+}
+
+export async function step(name, path, args, options, fds) {
+  const result = await spawned(path, args, options);
+  if (result.error) {
+    say(fds[2], `sccapture: ${name}: ${result.error.message}\n`);
+    return undefined;
+  }
+  if (result.code === 0) return result;
+  if (result.stderr.length) say(fds[2], result.stderr);
+  else say(fds[2], `sccapture: ${name} failed\n`);
+  return undefined;
+}
