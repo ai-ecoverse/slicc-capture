@@ -41,7 +41,7 @@ or without installing, `npx -p @ai-ecoverse/slicc-capture sccapture shot.png`.
 
 ### The installers
 
-Each release attaches `install.sh` and `install.ps1` next to the package tarball, `slicc-capture-<version>.tgz`, and a `SHA256SUMS` that lists all three. get.sliccy.ai serves the latest release's installers. Both work like mcpcat's `install.sh`:
+Each release attaches `install.sh` and `install.ps1` next to the package tarball, `slicc-capture-<version>.tgz`, and a `SHA256SUMS` that lists all three. The PR that adds the installers also adds them, the tarball and `SHA256SUMS` to `@semantic-release/github`'s `assets` in `.releaserc.json`, with a test in `test/integration/repo.test.mjs`, so no release ships without them. get.sliccy.ai serves the latest release's installers. Both work like mcpcat's `install.sh`:
 
 - **Options:** `--version <version>` installs that release instead of the latest; `--dir <dir>` puts the launcher there instead of the default; `--help` prints the usage and exits 0. An unknown option prints `slicc-capture: unknown option: <arg>` to stderr and exits 1. The environment variables `VERSION` and `INSTALL_DIR` do the same as the options. Through a pipe, `sh -s -- --dir ~/bin` passes options to `install.sh`, and `& ([scriptblock]::Create((irm https://get.sliccy.ai/slicc-capture.ps1))) --dir C:\tools` to `install.ps1`.
 - **Node 24 or later:** the `node` on `PATH` if it is new enough, else the one the installer downloaded before; else it downloads the current Node LTS from nodejs.org, checks it against that release's `SHASUMS256.txt`, and keeps it in the data directory. On musl Linux, where nodejs.org has no build, it says to install Node with the package manager and exits 1.
@@ -62,7 +62,7 @@ The get.sliccy.ai entries for `slicc-capture` and `slicc-capture.ps1` are added 
 usage: screencapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]
 ```
 
-Short options may be grouped (`-xc`), an option's value may be attached or separate (`-T3`, `-T 3`), and `--` ends the options. `--clipboard` is `-c` and `--view` is `-v`, as in slicc 6. `-h` or `--help` anywhere prints the usage to stdout and exits 0. `--version` prints the package's version, and `--upgrade` is described [below](#--upgrade); either must be the only argument.
+Short options may be grouped (`-xc`), an option's value may be attached or separate (`-T3`, `-T 3`), and `--` ends the options. `--clipboard` is `-c` and `--view` is `-v`, as in slicc 6. `-h` or `--help` anywhere prints the usage to stdout and exits 0. `--version` and `--upgrade` are described [below](#--upgrade); either must be the only argument.
 
 ### In SLICC
 
@@ -92,11 +92,11 @@ Errors, on stderr, from slicc 6 where they still apply:
 
 As `sccapture`, the messages start with `sccapture:`.
 
-**The bridge from the kernel to the page is not settled yet.** The commands run in a kernel worker, which has no `getDisplayMedia`, so a request has to reach seven's page and the frame has to come back. slicc-clipboard does this with a kernel character device that the kernel answers from its embedder's hook; slicc-open, slicc-capture and slicc-audio are agreeing one pattern for all three, in one slicc-kernel issue, with the kernel and seven's embedder (slicc-bios). Until then this section describes only what the user sees. The page side (the prompt, `getDisplayMedia`, the frame, the crop and the encoding) ships in this package for the embedder; its entry point, the transport and the `engines.slicc-kernel` it needs are added here once the pattern is agreed.
+**The bridge from the kernel to the page is not settled yet.** The commands run in a kernel worker, which has no `getDisplayMedia`, so a request has to reach seven's page and the frame has to come back. slicc-clipboard does this with a kernel character device that the kernel answers from its embedder's hook; slicc-open, slicc-capture and slicc-audio are agreeing one pattern for all three in [ai-ecoverse/slicc-kernel#1527](https://github.com/ai-ecoverse/slicc-kernel/issues/1527) (pending), with the kernel and seven's embedder (slicc-bios). Until then this section describes only what the user sees. The page side (the prompt, `getDisplayMedia`, the frame, the crop and the encoding) ships in this package for the embedder; its entry point, the transport and the `engines.slicc-kernel` it needs are added here once the pattern is agreed.
 
 ### Options
 
-Every option of macOS's `screencapture`, and what it does in SLICC and with `sccapture` on each host. On macOS, `sccapture` passes the options through to `screencapture` unchanged, except the ones the macOS column names. "No-op" means the option is accepted and changes nothing. "Not supported" means `<cmd>: <opt>: not supported in SLICC` (or `on Linux`, `on Windows`, `on macOS`) on stderr, exit 2, before anything is captured; "not with `<tool>`" means `sccapture: <opt>: not supported with <tool>`, exit 2, when that is the tool picked.
+Every option of macOS's `screencapture`, and what it does in SLICC and with `sccapture` on each host. On macOS, `sccapture` passes the options through to `screencapture` unchanged, except the ones the macOS column names. "No-op" means the option is accepted and changes nothing. "Not supported" means `<cmd>: <opt>: not supported in SLICC` (or `on Linux`, `on Windows`, `on macOS`) on stderr, exit 2, before anything is captured; "not with `<tool>`" means `sccapture: <opt>: not supported with <tool>`, exit 2, when no tool on `PATH` supports every option given (it names the first one tried).
 
 | option | macOS `screencapture` | SLICC | macOS `sccapture` | Linux `sccapture` | Windows `sccapture` |
 | --- | --- | --- | --- | --- | --- |
@@ -137,7 +137,7 @@ Video recording (`-v`, `-V`, `-g`, `-G`, `-k`) is out of scope on every platform
 
 ## On a host
 
-Only `sccapture` is installed on a host (the package's `bin`, a small Node script, `host/sccapture.mjs`); the host's own `screencapture`, `grim` and the rest are never shadowed. It runs the platform's tool with a fixed argv and no shell, the first one on `PATH`:
+Only `sccapture` is installed on a host (the package's `bin`, a small Node script, `host/sccapture.mjs`); the host's own `screencapture`, `grim` and the rest are never shadowed. It runs the platform's tool with a fixed argv and no shell: of the tools below, in this order, the first one on `PATH` that supports every option given (so on GNOME under X11, `-l` picks `import` over `gnome-screenshot`):
 
 | platform | tool | `-c` |
 | --- | --- | --- |
@@ -153,7 +153,7 @@ Only `sccapture` is installed on a host (the package's `bin`, a small Node scrip
 
 ### Linux
 
-How each option reaches the tool. `<file>` is the file, or a temporary PNG that is then copied with `-c` and deleted.
+How each option reaches the tool. "Not with `<tool>`" is the error only when no tool on `PATH` supports every option given, and it names the first one tried. `<file>` is the file, or a temporary PNG that is then copied with `-c` and deleted.
 
 | option | `grim` | `gnome-screenshot` | `import` | `scrot` |
 | --- | --- | --- | --- | --- |
@@ -175,13 +175,13 @@ Under Wayland, `grim` needs a compositor with wlr-screencopy (sway, Hyprland and
 
 The package has both `bin` and `slicc.commands`, and both name `sccapture`. As with slicc-clipboard, the kernel ignores a package's `bin` entry when the same package declares that name in `slicc.commands`, and bios removes the `$PNPM_HOME/bin` link pnpm makes for it, so the Node script, which SLICC has no Node to run, never shadows the SLICC command.
 
-## --upgrade
+## `--upgrade`
 
-`sccapture --upgrade` (and `screencapture --upgrade` in SLICC) is the same flag, with the same output, as in slicc-open, slicc-audio and slicc-man:
+Every host command takes `--upgrade`. It runs the latest release's installer (`install.sh`, or `install.ps1` on Windows) with `--dir` set to the directory the command is installed in, so the new version replaces the old one in place, then prints `<cmd>: <old> → <new>` (for example `sccapture: 1.2.0 → 1.3.0`), or `<cmd>: already up to date (<version>)`, to stdout and exits 0. If the installer fails, its stderr is passed through and the command exits 1. A command installed with npm prints `npm install -g @ai-ecoverse/slicc-capture@latest` to run instead, and exits 0. In SLICC, `--upgrade` prints `pnpm add -g @ai-ecoverse/slicc-capture@latest` to run, and exits 0; it installs nothing itself. `--upgrade` takes no other arguments.
 
-- **Installed by `install.sh` or `install.ps1`:** it reads the latest release's version from GitHub. If that is the running version, it prints `sccapture <version>: already up to date` and exits 0. Otherwise it downloads that release's installer and runs it with `--version <new>` and `--dir` set to the directory of the launcher it was started from, so the new version replaces the old one in the same place, then prints `sccapture <old> → <new>` and exits 0. A failed download or install prints its error to stderr and exits 1, and the old version stays.
-- **Installed any other way** (npm, npx, a checkout): it prints `npm install -g @ai-ecoverse/slicc-capture@latest`, the command to run, and exits 0.
-- **In SLICC:** it prints `pnpm add -g @ai-ecoverse/slicc-capture@latest`, the command to run, and exits 0.
+For slicc-capture, the commands are `sccapture` on a host and `screencapture` and `sccapture` in SLICC.
+
+`--version` prints the version (`0.1.0`) to stdout and exits 0, on a host and in SLICC; the installers call the launcher with it. It takes no other arguments either.
 
 ## Development
 
