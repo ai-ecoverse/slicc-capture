@@ -37,9 +37,11 @@ describe('the repository', () => {
 
   it('pins every devDependency exactly', () => {
     for (const [name, version] of Object.entries(pkg.devDependencies)) {
-      assert.match(version, /^\d+\.\d+\.\d+$/, name);
+      assert.match(version, /^(npm:@ai-ecoverse\/slicc-kernel@)?\d+\.\d+\.\d+(-\d+)?$/, name);
     }
     assert.equal(pkg.engines.node, '>=24');
+    assert.equal(pkg.engines['slicc-kernel'], '>=1.153.0');
+    assert.equal(pkg.devDependencies['@ai-ecoverse/slicc-kernel'], '1.153.0');
   });
 
   it('publishes to npm from ci.yml through semantic-release, with provenance', () => {

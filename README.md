@@ -13,7 +13,7 @@ screencapture -T 3 -R 0,0,800,600 -t jpg crop.jpg
 
 ## Install
 
-In SLICC, the package declares `screencapture` and `sccapture` in `slicc.commands`, so installing it puts both in `/usr/bin`:
+In SLICC, the package declares `screencapture` and `sccapture` in `slicc.commands` (POSIX `sh` scripts in `bin/`), so installing it puts both in `/usr/bin`. They need slicc-kernel 1.153.0 or later, for [`/dev/embedder`](#the-request) (`engines.slicc-kernel` is `>=1.153.0`; an older kernel refuses them with exit 126 and `<cmd>: @ai-ecoverse/slicc-capture@<version> needs slicc-kernel >=1.153.0; this kernel is <version>`):
 
 ```sh
 pnpm add -g @ai-ecoverse/slicc-capture
@@ -72,33 +72,55 @@ Short options may be grouped (`-xc`), an option's value may be attached or separ
 
 ### In SLICC
 
-`screencapture file` asks seven's page to capture. `getDisplayMedia` needs a user gesture, so the page first shows a prompt, `screencapture wants to capture your screen`, with **Choose…** and **Cancel**; **Choose…** opens Chrome's picker. After the user picks, the command waits for `-T` seconds, if given, takes one frame, crops it to `-R`, if given, encodes it and stops the capture.
+`screencapture file` asks seven's page to capture, as a `capture.screen` request on `/dev/embedder` ([below](#the-request)). `getDisplayMedia` needs a user gesture, so the page first shows a prompt, `screencapture wants to capture your screen`, with **Choose…** and **Cancel**; **Choose…** opens Chrome's picker. After the user picks, the page waits for `-T` seconds, if given, takes one frame, crops it to `-R`, if given, encodes it and stops the capture. The command writes the bytes it gets back unchanged; an existing file is replaced only once the capture has arrived.
 
 - **The file:** written as PNG, JPEG or WebP: `-t` decides, else the file's extension (`.png`, `.jpg` or `.jpeg`, `.webp`), else PNG. JPEG and WebP use quality 0.92. On success it prints `captured <n> KB to <file>`.
-- **`-c`:** copies the capture to the clipboard as `image/png`, through [slicc-clipboard](https://github.com/ai-ecoverse/slicc-clipboard), and prints `captured <n> KB to clipboard`. A file named with `-c` is ignored, as with macOS's `-c`, and so is `-t`. slicc-clipboard's device is text only today; `-c` needs its image path, which is being added there.
-- **`-v`:** shows the capture inline in the agent's tool result. With a file, it writes the file and prints `<path> (<n> KB)` followed by the image; without one, it prints only the image; with `-c`, it copies and shows. slicc 6 printed the image as `<img:data:<type>;base64,<data>>`; seven's marker for an inline image is being agreed with slicc-agent, and `-v` uses whatever that is. macOS's `-v` (record a video) is out of scope everywhere.
+- **`-c`:** captures a PNG and copies it to the clipboard as `image/png`, with a `clipboard.write` request on `/dev/embedder`, which seven's embedder (slicc-bios) answers; [slicc-clipboard](https://github.com/ai-ecoverse/slicc-clipboard)'s `/dev/clipboard` stays text only. It prints `captured <n> KB to clipboard`. A file named with `-c` is ignored, as with macOS's `-c`, and so is `-t`. The `clipboard.write` request is sent before the prompt, so a page that doesn't answer it fails at once, without a capture.
+- **`-v`:** shows the capture inline in the agent's tool result, by printing one line `<img:<absolute path>>` on stdout, the marker agreed in [ai-ecoverse/slicc-agent#713](https://github.com/ai-ecoverse/slicc-agent/issues/713): the agent reads that file, detects PNG, JPEG, GIF or WebP by its magic bytes, fits the image to 1600 px wide and 1 MB of base64, and replaces the line with `<path> (<mime>, <bytes> bytes)` and the image in the tool result (at most 4 per command). With a file, `-v` writes it and prints only the marker for it; without one, it writes the capture to a new `${TMPDIR:-/tmp}/screencapture-XXXXXX.<type>`, which it leaves there for the agent, and prints the marker for that; with `-c`, it copies, prints `captured <n> KB to clipboard`, and then the marker of such a file. slicc 6's `<img:data:<type>;base64,<data>>` is gone: base64 on stdout is scrubbed and cut by the output tail. The agent's side of #713 isn't shipped yet; until it is, the marker shows as the line itself. macOS's `-v` (record a video) is out of scope everywhere.
 - **No file:** without a file, `-c` or `-v`: `screencapture: output file required (or use -c for clipboard)` and the usage to stderr, exit 2.
 
 Errors, on stderr, from slicc 6 where they still apply:
 
 | error | exit |
 | --- | --- |
-| `screencapture: user cancelled or permission denied` (**Cancel**, the picker closed, or the capture refused) | 1 |
-| `screencapture: timed out waiting for the picker` (no answer within 5 minutes) | 1 |
-| `screencapture: browser APIs are unavailable in this environment` (an embedder that doesn't answer capture requests) | 1 |
-| `screencapture: screen capture is not supported in this browser` (no `getDisplayMedia`) | 1 |
-| `screencapture: -R: rectangle outside the capture` | 1 |
-| `screencapture: failed to write file: <message>` | 1 |
-| `screencapture: failed to copy to clipboard: <message>` | 1 |
+| `screencapture: user cancelled, permission denied, or the surface is protected` (`EACCES`: **Cancel**, the picker closed, the capture refused, or the embedder refused the surface the user picked) | 1 |
+| `screencapture: timed out waiting for the picker` (no answer within 5 minutes; the page's message) | 1 |
+| `screencapture: browser APIs are unavailable in this environment` (`ENOTSUP` for the header: no page answers `capture.screen`) | 1 |
+| `screencapture: screen capture is not supported in this browser` (`ENOTSUP` from the page, without a message of its own: no `getDisplayMedia`) | 1 |
+| `screencapture: -R: rectangle outside the capture` (the page's message) | 1 |
+| `screencapture: <message>` (any other error of the page, `EIO` or `ENOENT`: the first line of its message, else the errno's text, such as `I/O error`) | 1 |
+| `screencapture: the page sent no image` (an empty reply) | 1 |
+| `screencapture: interrupted` (a signal ended the request; the exit status is the reader's, `128 + n`) | `128 + n` |
+| `screencapture: failed to write file: <file>: <message>` | 1 |
+| `screencapture: failed to copy to clipboard: this page does not copy images (no clipboard.write)` (`ENOTSUP`: no page answers `clipboard.write`) | 1 |
+| `screencapture: failed to copy to clipboard: <message>` (the page's message, else the errno's text) | 1 |
+| `screencapture: /dev/embedder not available (needs slicc-kernel >= 1.153.0)` (a kernel that runs the commands without the device) | 1 |
 | `screencapture: unknown option: <arg>`, then the usage | 2 |
 | `screencapture: <opt>: not supported in SLICC` | 2 |
 | `screencapture: -t <format>: not supported in SLICC` | 2 |
 | `screencapture: -T: invalid delay: <value>`, `-R: invalid rectangle: <value>`, `-D: invalid display: <value>`, `-J: invalid style: <value>` | 2 |
 | `screencapture: more than one file: not supported in SLICC` | 2 |
 
-As `sccapture`, the messages start with `sccapture:`.
+As `sccapture`, the messages start with `sccapture:`. A line of progress from the page (`progress(line)`) reaches stderr as `<cmd>: <line>` while the command waits.
 
-**The bridge from the kernel to the page is not settled yet.** The commands run in a kernel worker, which has no `getDisplayMedia`, so a request has to reach seven's page and the frame has to come back. slicc-clipboard does this with a kernel character device that the kernel answers from its embedder's hook; slicc-open, slicc-capture and slicc-audio are agreeing one pattern for all three in [ai-ecoverse/slicc-kernel#1527](https://github.com/ai-ecoverse/slicc-kernel/issues/1527) (pending), with the kernel and seven's embedder (slicc-bios). Until then this section describes only what the user sees. The page side (the prompt, `getDisplayMedia`, the frame, the crop and the encoding) ships in this package for the embedder; its entry point, the transport and the `engines.slicc-kernel` it needs are added here once the pattern is agreed.
+### The request
+
+The commands run in a kernel worker, which has no `getDisplayMedia`, so they ask seven's page over [`/dev/embedder`](https://github.com/ai-ecoverse/slicc-kernel#devembedder) (slicc-kernel 1.153.0, [#1527](https://github.com/ai-ecoverse/slicc-kernel/issues/1527)): one open file description per request, a JSON header line `{ kind, …options }`, then the body, and the reply read to end-of-file. The page side, the prompt, `getDisplayMedia`, the frame, the crop and the encoding, is a page module that slicc-bios registers for `capture.screen` and wraps with its own prompt, user activation, `selfBrowserSurface: 'exclude'` and a check of the picked surface against protected origins; it answers this contract:
+
+- **`capture.screen`:** the header is plain JSON, with no body, and the reply is the encoded image's bytes, nothing else. The command opens the device read-write (`exec 3<>/dev/embedder`), writes the header from a child `sh` that stays until the reply is read (so the page's progress reaches stderr), and reads the reply with `cat <&3`.
+
+| header field | value | from |
+| --- | --- | --- |
+| `kind` | `"capture.screen"` | |
+| `type` | `"image/png"`, `"image/jpeg"` or `"image/webp"` | `-t`, else the file's extension, else PNG; always PNG with `-c` |
+| `quality` | `0.92`, only for JPEG and WebP | |
+| `cursor` | `"always"` or `"never"`, for `getDisplayMedia`'s `cursor` | `-C` |
+| `surface` | `"monitor"` or `"window"`, absent without one, for `displaySurface` (a hint: the user still picks) | `-m` and `-D` give `"monitor"`; `-w`, `-W` and `-J window` give `"window"`; the last one wins |
+| `delay` | seconds as a JSON number (`3`, `0.5`), absent without `-T`; the page waits that long after the picker | `-T` |
+| `rect` | `{ "x", "y", "width", "height" }`, whole numbers in the frame's pixels, absent without `-R`; outside the frame, the page rejects with `-R: rectangle outside the capture` | `-R` |
+
+For example, `screencapture -C -T 2 -R 0,0,800,600 shot.jpg` sends `{"kind":"capture.screen","type":"image/jpeg","quality":0.92,"cursor":"always","delay":2,"rect":{"x":0,"y":0,"width":800,"height":600}}`. The page rejects with a `NotAllowedError` or `AbortError` for **Cancel**, a closed picker, a refused permission or a protected surface (`EACCES`); a `NotSupportedError` without `getDisplayMedia` (`ENOTSUP`); and any other error, such as a `TimeoutError` `timed out waiting for the picker` after 5 minutes, with the message the command prints (`EIO`). It aborts the capture when its `signal` does.
+- **`clipboard.write`:** `-c` sends `{"kind":"clipboard.write","type":"image/png"}` and the PNG as the body, and reads the reply, which is empty, to end-of-file. slicc-bios answers it; with no page that does, the header write fails with `ENOTSUP`. The device is opened read-write and the reply read only after the whole body is written, so a page that answers without reading the body ([slicc-kernel#1536](https://github.com/ai-ecoverse/slicc-kernel/issues/1536)) is the only way a body over 1 MiB could block; the embedder's handler reads it.
 
 ### Options
 
@@ -109,8 +131,8 @@ Every option of macOS's `screencapture`, and what it does in SLICC and with `scc
 | `-a` | don't capture attached windows | no-op | passed | no-op | no-op |
 | `-b` | capture the Touch Bar | not supported | passed | not supported | not supported |
 | `-B <bundleid>` | open in that app | not supported | passed | not supported | not supported |
-| `-c` | to the clipboard | through slicc-clipboard, as `image/png` | passed | see [Linux](#linux) | `Clipboard.SetImage` |
-| `-C` | include the cursor | asks for `cursor: 'always'` (else `'never'`), which the browser may not honour | passed | see [Linux](#linux) | draws the cursor into the image |
+| `-c` | to the clipboard | a `clipboard.write` request, as `image/png` | passed | see [Linux](#linux) | `Clipboard.SetImage` |
+| `-C` | include the cursor | `"cursor": "always"` (else `"never"`), which the browser may not honour | passed | see [Linux](#linux) | draws the cursor into the image |
 | `-d` | show errors graphically | no-op | passed | no-op | no-op |
 | `-D <display>` | that display (1 is main) | prefers `displaySurface: 'monitor'`; the user picks the screen | passed | not supported | screen *n*: 1 is the primary, then the others in `AllScreens` order; no such screen is `sccapture: -D <n>: no such display`, exit 1 |
 | `-g` | record default audio input | not supported | not supported | not supported | not supported |
@@ -132,7 +154,7 @@ Every option of macOS's `screencapture`, and what it does in SLICC and with `scc
 | `-T <seconds>` | wait before capturing | waits after the picker | passed | `sccapture` waits, then runs the tool | `sccapture` waits, then captures |
 | `-u` | show the UI afterwards, file ignored | not supported | passed | not supported | not supported |
 | `-U` | the interactive toolbar | not supported | passed | not supported | not supported |
-| `-v` | record a video | inline in the tool result (slicc 6's `-v`) | not supported | not supported | not supported |
+| `-v` | record a video | inline in the tool result, as an `<img:<path>>` line ([slicc-agent#713](https://github.com/ai-ecoverse/slicc-agent/issues/713)) | not supported | not supported | not supported |
 | `-V <seconds>` | record a video for that long | not supported | not supported | not supported | not supported |
 | `-w` | window selection only | prefers `displaySurface: 'window'` | passed | see [Linux](#linux) | not supported |
 | `-W` | start in window selection | prefers `displaySurface: 'window'` | passed | as `-w` | not supported |
@@ -201,9 +223,9 @@ npm run test:unit
 ```
 
 - `npm install` also installs the git hooks into this worktree's own `node_modules/` through slicc-shared-web's `slicc-install-hooks` and the committed `.githooks/`.
-- `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks, then `shellcheck -s sh` and `dash -n` on `install.sh`.
-- `npm test`: the integration tests in `test/integration/`. `test/integration/repo.test.mjs` checks the workflow, the release config, the pinned devDependencies and what `npm pack` ships. The host tests run `host/` against fake `screencapture`, `grim`, `slurp`, `gnome-screenshot`, `import`, `scrot`, `wl-copy`, `xclip`, `xdg-open`, `powershell.exe` and `pwsh.exe` on a temporary `PATH`, and `--upgrade` against installers served from a local HTTP server, with the platform forced, so each branch is checked on any machine; only CI touches a real screen. `install.test.mjs` runs `install.sh` on a tarball packed from the tree, with the Node on `PATH` and with a Node download from a fake `nodejs.org`, and `--upgrade` against a release served from a local directory; `install.ps1` is checked statically, and run when `pwsh` is on `PATH`.
-- `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines, and runs `diff-cover` through `uvx`, so install [uv](https://docs.astral.sh/uv/) once.
+- `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks, then `shellcheck -s sh` and `dash -n` on `install.sh` and `bin/*`.
+- `npm test`: the integration tests in `test/integration/`. `commands.test.mjs` runs `screencapture` and `sccapture` on `@ai-ecoverse/slicc-kernel/node` (the version `engines.slicc-kernel` names, pinned) with wasm-bash and wasm-coreutils, and a fake `capture.screen` and `clipboard.write` handler (`createNodeKernel({ requests })`): every option's header, the bytes written unchanged, the errnos and their messages, `-c`, `-v`, and slicc-kernel 1.152.2, which has no `/dev/embedder`. `test/integration/repo.test.mjs` checks the workflow, the release config, the pinned devDependencies and what `npm pack` ships. The host tests run `host/` against fake `screencapture`, `grim`, `slurp`, `gnome-screenshot`, `import`, `scrot`, `wl-copy`, `xclip`, `xdg-open`, `powershell.exe` and `pwsh.exe` on a temporary `PATH`, and `--upgrade` against installers served from a local HTTP server, with the platform forced, so each branch is checked on any machine; only CI touches a real screen. `install.test.mjs` runs `install.sh` on a tarball packed from the tree, with the Node on `PATH` and with a Node download from a fake `nodejs.org`, and `--upgrade` against a release served from a local directory; `install.ps1` is checked statically, and run when `pwsh` is on `PATH`.
+- `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. `npm run test:sh` runs the `test/unit/*.sh.mjs` ones, which trace `bin/` with `set -x` in the node kernel, and writes `coverage/sh/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines of both, and runs `diff-cover` through `uvx`, so install [uv](https://docs.astral.sh/uv/) once.
 
 CI is `.github/workflows/ci.yml`, the only workflow, which runs [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) at the devDependency's version: `npm run lint`, then `npm test`, then on a pull request the Claude and Codex reviews. The merge queue requires `ci / integration` and `ci / review`. On a push to `main`, semantic-release releases and publishes to npm through trusted publishing, with provenance from `ci.yml`, and attaches the installers.
 
