@@ -168,18 +168,27 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
     return { dir, log, calls };
   }
 
-  function probe() {
-    const dir = mkdtempSync(join(scratch, 'probe-'));
-    const log = join(dir, 'argv.log');
-    const script = join(dir, 'argv.cjs');
+  function probe(bin, local) {
+    const entry = join(local, 'slicc-capture', version, 'host', 'sccapture.mjs');
+    const argv = join(local, 'argv.mjs');
     writeFileSync(
-      script,
-      "require('node:fs').appendFileSync(process.env.PROBE_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');\nprocess.exit(0);\n"
+      argv,
+      "import { appendFileSync } from 'node:fs';\nappendFileSync(process.env.PROBE_LOG, `${JSON.stringify(process.argv.slice(2))}\\n`);\n"
     );
-    const env = clean({ PROBE_LOG: log, NODE_OPTIONS: `--require "${script}"` });
+    const log = join(local, 'argv.log');
+    const ps1 = join(bin, 'probe.ps1');
+    const launcher = join(bin, 'probe.cmd');
+    writeFileSync(
+      ps1,
+      readFileSync(join(bin, 'sccapture.ps1'), 'utf8').replace(`'${entry}'`, `'${argv}'`)
+    );
+    writeFileSync(
+      launcher,
+      readFileSync(join(bin, 'sccapture.cmd'), 'utf8').replace(`"${entry}"`, `"${argv}"`)
+    );
     const seen = () =>
       existsSync(log) ? lines(readFileSync(log, 'utf8')).map((line) => JSON.parse(line)) : [];
-    return { env, seen };
+    return { env: clean({ PROBE_LOG: log }), ps1, launcher, seen };
   }
 
   before(async () => {
@@ -301,7 +310,7 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
         );
       }
 
-      const argv = probe();
+      const argv = probe(bin, local);
       const tricky = [
         'a )&%^ b "q" c',
         'x"y\\',
@@ -312,21 +321,31 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
         "it's",
       ];
       const typed = ['a )&%^ b "q" c', 'x"y" z', 'tail\\', '%SCCAPTURE_NOPE%'];
-      const modes = shell === 'pwsh' ? ['', "$PSNativeCommandArgumentPassing = 'Legacy'; "] : [''];
+      const modes =
+        shell === 'pwsh'
+          ? [
+              '',
+              "$PSNativeCommandArgumentPassing = 'Legacy'; ",
+              'Remove-Variable PSNativeCommandArgumentPassing; ',
+            ]
+          : [''];
       for (const mode of modes) {
         const viaPs = await ps(
           exe,
-          `${mode}$a = ConvertFrom-Json $env:T_ARGS; & $env:T_LAUNCHER @a; exit $LASTEXITCODE`,
-          { ...argv.env, T_LAUNCHER: ps1, T_ARGS: JSON.stringify(tricky) }
+          `${mode}$a = ConvertFrom-Json $env:T_ARGS; & $env:T_LAUNCHER @a; & $env:T_LAUNCHER -R '1,2,3,4' a,'b c' d; exit $LASTEXITCODE`,
+          { ...argv.env, T_LAUNCHER: argv.ps1, T_ARGS: JSON.stringify(tricky) }
         );
         assert.equal(viaPs.status, 0, `${mode}${viaPs.stderr}`);
       }
       const viaCmd = await batch(
-        `"${launcher}" "a )&%^ b \\"q\\" c" "x\\"y\\" z" tail\\ %SCCAPTURE_NOPE%`,
+        `"${argv.launcher}" "a )&%^ b \\"q\\" c" "x\\"y\\" z" tail\\ %SCCAPTURE_NOPE%`,
         argv.env
       );
       assert.equal(viaCmd.status, 0, viaCmd.stderr);
-      assert.deepEqual(argv.seen(), [...modes.map(() => tricky), typed]);
+      assert.deepEqual(argv.seen(), [
+        ...modes.flatMap(() => [tricky, ['-R', '1,2,3,4', 'a', 'b c', 'd']]),
+        typed,
+      ]);
 
       const fake = fakes();
       const work = mkdtempSync(join(scratch, 'work-'));
@@ -407,6 +426,17 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
       ],
     ];
     if (pwsh) {
+      const modules = spawnSync(pwsh, ['-NoProfile', '-Command', '$env:PSModulePath'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      runs.push([
+        'cmd with pwsh PSModulePath',
+        (file, args) =>
+          batch(
+            `"${join(bin, 'sccapture.cmd')}" ${args} "${file}"`,
+            clean({ PSModulePath: modules })
+          ),
+      ]);
       runs.push([
         'pwsh',
         (file, args) =>

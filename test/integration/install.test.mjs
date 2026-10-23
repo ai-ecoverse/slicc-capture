@@ -560,7 +560,8 @@ describe('install.ps1', () => {
       "'$sccapturePrevious = $env:SCCAPTURE_INSTALL_DIR',",
       "'$sccaptureProxy = $env:NODE_USE_ENV_PROXY',",
       "'$sccaptureMode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue',",
-      "'  if ($null -ne $sccaptureMode -and \"$sccaptureMode\" -ne ''Legacy'') { $sccaptureText }',",
+      "'$sccaptureLegacy = $PSVersionTable.PSVersion.Major -lt 7 -or \"$sccaptureMode\" -eq ''Legacy'' -or ($null -eq $sccaptureMode -and $PSVersionTable.PSVersion.Major -eq 7 -and $PSVersionTable.PSVersion.Minor -lt 3)',",
+      "'$sccaptureArgs = @(foreach ($sccaptureArg in $args) { foreach ($sccaptureItem in @($sccaptureArg)) {',",
       "'if ($null -eq $sccaptureProxy) { $env:NODE_USE_ENV_PROXY = ''1'' }',",
       "'  if ($null -eq $sccaptureProxy) { Remove-Item -LiteralPath Env:NODE_USE_ENV_PROXY -ErrorAction SilentlyContinue }',",
       "'try {',",
@@ -693,18 +694,24 @@ describe('install.ps1', () => {
         readFileSync(join(bin, 'sccapture.ps1'), 'utf8').replace(`'${entry2}'`, `'${argv}'`)
       );
       const tricky = ['a )&%^ b "q" c', 'x"y\\', 'sp ace\\', 'tail\\', '', "it's"];
-      for (const mode of ['Standard', 'Legacy']) {
+      for (const mode of [
+        "$PSNativeCommandArgumentPassing = 'Standard'",
+        "$PSNativeCommandArgumentPassing = 'Legacy'",
+        'Remove-Variable PSNativeCommandArgumentPassing',
+      ]) {
         const passed = await run(
           pwsh,
           [
             '-NoProfile',
             '-NonInteractive',
             '-Command',
-            `$PSNativeCommandArgumentPassing = '${mode}'; $a = ConvertFrom-Json $env:T_ARGS; & '${passing}' @a`,
+            `${mode}; $a = ConvertFrom-Json $env:T_ARGS; & '${passing}' @a; & '${passing}' a,'b c' d`,
           ],
           { env: env({ T_ARGS: JSON.stringify(tricky) }) }
         );
-        assert.deepEqual(JSON.parse(passed.stdout), tricky, `${mode}: ${passed.stderr}`);
+        const [all, list] = passed.stdout.split(/(?<=\])(?=\[)/).map((part) => JSON.parse(part));
+        assert.deepEqual(all, tricky, `${mode}: ${passed.stderr}`);
+        assert.deepEqual(list, ['a', 'b c', 'd'], mode);
       }
       const restricted = await run(
         pwsh,
