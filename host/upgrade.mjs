@@ -1,107 +1,101 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { dirs, lookup, say, step } from './tools.mjs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { lookup, say } from './tools.mjs';
 
-const base = 'https://github.com/ai-ecoverse/slicc-capture/releases/latest/download';
+const latest = 'https://github.com/ai-ecoverse/slicc-capture/releases/latest/download';
 
-function version(dir) {
-  return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version;
+function fail(fds, text) {
+  say(fds[2], `sccapture: ${text}\n`);
+  return 1;
 }
 
-function home(platform, env) {
-  if (platform === 'win32') return join(env.LOCALAPPDATA ?? homedir(), 'slicc-capture');
-  return join(env.XDG_DATA_HOME || join(env.HOME ?? homedir(), '.local', 'share'), 'slicc-capture');
+function version(entry) {
+  return JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')).version;
 }
 
-function real(path) {
+async function download(url) {
   try {
-    return realpathSync(path);
-  } catch {
-    return path;
+    const response = await fetch(url, { redirect: 'follow' });
+    if (!response.ok) return { error: `HTTP ${response.status}` };
+    return { text: await response.text() };
+  } catch (error) {
+    return { error: error.cause?.message ?? error.message };
   }
 }
 
-function launcher(platform, env, data) {
-  const fallback =
-    platform === 'win32'
-      ? join(home(platform, env), 'bin')
-      : join(env.HOME ?? homedir(), '.local', 'bin');
-  const name = platform === 'win32' ? 'sccapture.cmd' : 'sccapture';
-  const marks = [data];
-  if (real(home(platform, env)) === data) marks.push(home(platform, env));
-  for (const dir of [...dirs(platform, env), fallback]) {
-    let text;
+function first(files, platform, env) {
+  for (const file of files) {
+    const path = lookup(file, platform, env);
+    if (path) return { file, path };
+  }
+  return undefined;
+}
+
+function installer(platform, env, path, dir) {
+  if (platform === 'win32') {
+    const tool = first(['powershell.exe', 'pwsh.exe'], platform, env);
+    const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path];
+    return tool && { tool, args: [...args, '-Dir', dir] };
+  }
+  const tool = first(['sh'], platform, env);
+  return tool && { tool, args: [path, '--dir', dir] };
+}
+
+function wait(path, args, { env, stderr }) {
+  return new Promise((resolve) => {
+    let child;
     try {
-      text = readFileSync(join(dir, name), 'utf8');
-    } catch {
-      continue;
+      child = spawn(path, args, {
+        env,
+        stdio: ['ignore', 'pipe', stderr],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({ error });
+      return;
     }
-    if (marks.some((mark) => text.includes(mark))) return dir;
-  }
-  return fallback;
-}
-
-export function installed(entry) {
-  const data = dirname(dirname(dirname(real(entry))));
-  if (basename(data) !== 'slicc-capture' || !existsSync(join(data, 'current'))) return undefined;
-  return data;
+    const out = [];
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.on('error', (error) => resolve({ error }));
+    child.on('close', (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(out) }));
+  });
 }
 
 export async function upgrade({ entry, env, platform, fds }) {
-  const root = dirname(dirname(entry));
-  const old = version(root);
-  const data = installed(entry);
-  if (!data) {
+  const dir = env.SCCAPTURE_INSTALL_DIR;
+  if (!dir) {
     say(fds[1], 'npm install -g @ai-ecoverse/slicc-capture@latest\n');
     return 0;
   }
-  const windows = platform === 'win32';
-  const getters = windows ? ['curl.exe'] : ['curl', 'wget'];
-  const getter = getters
-    .map((name) => ({ name, path: lookup(name, platform, env) }))
-    .find((g) => g.path);
-  if (!getter) {
-    say(fds[2], `sccapture: no downloader found (tried ${getters.join(', ')})\n`);
-    return 1;
-  }
-  const shells = windows ? ['powershell.exe', 'pwsh.exe'] : ['sh'];
-  const shell =
-    shells.map((name) => lookup(name, platform, env)).find(Boolean) ??
-    (windows ? undefined : '/bin/sh');
-  if (!shell) {
-    say(fds[2], `sccapture: no PowerShell found (tried ${shells.join(', ')})\n`);
-    return 1;
-  }
-  const child = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (!['VERSION', 'INSTALL_DIR'].includes(key.toUpperCase())) child[key] = value;
-  }
+  const name = platform === 'win32' ? 'install.ps1' : 'install.sh';
+  const url = `${(env.SLICC_INSTALL_BASE_URL || latest).replace(/\/+$/, '')}/${name}`;
+  const fetched = await download(url);
+  if (fetched.error) return fail(fds, `could not download ${url}: ${fetched.error}`);
   const scratch = mkdtempSync(join(tmpdir(), 'sccapture-upgrade-'));
   try {
-    const name = windows ? 'install.ps1' : 'install.sh';
-    const script = join(scratch, name);
-    const url = `${base}/${name}`;
-    const fetch = getter.name === 'wget' ? ['-q', '-O', script, url] : ['-fsSL', '-o', script, url];
-    if (!(await step(getter.name, getter.path, fetch, { env: child }, fds))) return 1;
-    const dir = launcher(platform, env, data);
-    const args = windows
-      ? [
-          '-NoProfile',
-          '-NonInteractive',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-File',
-          script,
-          '--dir',
-          dir,
-        ]
-      : [script, '--dir', dir];
-    if (!(await step(name, shell, args, { env: child }, fds))) return 1;
-    const now = version(join(data, 'current'));
+    const path = join(scratch, name);
+    writeFileSync(path, fetched.text);
+    const run = installer(platform, env, path, dir);
+    if (!run) {
+      const tried = platform === 'win32' ? 'powershell.exe, pwsh.exe' : 'sh';
+      return fail(fds, `no shell found to run ${name} (tried ${tried})`);
+    }
+    const child = { ...env };
+    delete child.SCCAPTURE_INSTALL_DIR;
+    const result = await wait(run.tool.path, run.args, { env: child, stderr: fds[2] });
+    if (result.error) return fail(fds, `${run.tool.file}: ${result.error.message}`);
+    if (result.code !== 0) return 1;
+    const installed = /^sccapture (\S+) installed to /m.exec(result.stdout.toString())?.[1];
+    if (!installed) return fail(fds, `${name} did not say which version it installed`);
+    const old = version(entry);
     say(
       fds[1],
-      now === old ? `sccapture: already up to date (${old})\n` : `sccapture: ${old} → ${now}\n`
+      installed === old
+        ? `sccapture: already up to date (${old})\n`
+        : `sccapture: ${old} → ${installed}\n`
     );
     return 0;
   } finally {

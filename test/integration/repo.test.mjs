@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
@@ -50,8 +50,30 @@ describe('the repository', () => {
     assert.equal(pkg.publishConfig.provenance, true);
     const release = JSON.parse(read('.releaserc.json'));
     assert.deepEqual(release.branches, ['main']);
-    assert.ok(release.plugins.includes('@semantic-release/npm'));
+    assert.ok(release.plugins.some((entry) => [entry].flat()[0] === '@semantic-release/npm'));
     assert.doesNotMatch(JSON.stringify(release), /npmPublish/);
+  });
+
+  it('attaches the tarball, SHA256SUMS, install.sh and install.ps1 to the GitHub release', () => {
+    const release = JSON.parse(read('.releaserc.json'));
+    const plugin = (name) => release.plugins.find((entry) => [entry].flat()[0] === name);
+    assert.deepEqual(plugin('@semantic-release/npm'), [
+      '@semantic-release/npm',
+      { tarballDir: 'release' },
+    ]);
+    assert.deepEqual(plugin('@semantic-release/exec')[1], {
+      prepareCmd: 'node scripts/assets.mjs release ${nextRelease.version}',
+    });
+    const names = release.plugins.map((entry) => [entry].flat()[0]);
+    assert.ok(names.indexOf('@semantic-release/npm') < names.indexOf('@semantic-release/exec'));
+    assert.ok(names.indexOf('@semantic-release/exec') < names.indexOf('@semantic-release/github'));
+    assert.deepEqual(
+      plugin('@semantic-release/github')[1].assets.map((asset) => asset.path),
+      ['release/slicc-capture-*.tgz', 'release/SHA256SUMS', 'install.sh', 'install.ps1']
+    );
+    assert.ok(existsSync(join(root, 'install.sh')));
+    assert.ok(existsSync(join(root, 'install.ps1')));
+    assert.match(read('.gitignore'), /^release\/$/m);
   });
 
   it('keeps unit tests out of git', () => {

@@ -4,7 +4,21 @@
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    "@semantic-release/npm",
-    "@semantic-release/github"
+    ["@semantic-release/npm", { "tarballDir": "release" }],
+    [
+      "@semantic-release/exec",
+      { "prepareCmd": "node scripts/assets.mjs release ${nextRelease.version}" }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          { "path": "release/slicc-capture-*.tgz" },
+          { "path": "release/SHA256SUMS", "label": "SHA256SUMS" },
+          { "path": "install.sh", "label": "install.sh" },
+          { "path": "install.ps1", "label": "install.ps1" }
+        ]
+      }
+    ]
   ]
 }

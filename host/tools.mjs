@@ -33,7 +33,7 @@ export function spawned(path, args, { env, stdin = 'ignore', capture = false }) 
     let child;
     try {
       child = spawn(path, args, {
-        env,
+        env: { ...env, SCCAPTURE_INSTALL_DIR: undefined },
         stdio: [stdin, capture ? 'pipe' : 'ignore', 'pipe'],
         shell: false,
         windowsHide: true,
