@@ -26,6 +26,7 @@ jobs:
     with:
       test-glob: test/integration/*.test.mjs
       shards: 1
+      windows-test: npm run test:windows
       review-prompt: |
         SLICC-CAPTURE
 

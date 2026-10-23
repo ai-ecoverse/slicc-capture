@@ -125,6 +125,7 @@ try {
 
     $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("sccapture-install-" + [System.Guid]::NewGuid())
     New-Item -ItemType Directory -Path $Tmp | Out-Null
+    $Extract = $null
     try {
       $Sums = Join-Path $Tmp 'SHA256SUMS'
       Get-File "$Base/SHA256SUMS" $Sums
@@ -155,10 +156,28 @@ try {
       if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Extract 'host') "$BinName.mjs"))) {
         Stop-Install "$Tgz has no host/$BinName.mjs"
       }
+      & $Node -e 'const f = process.argv[1]; const p = JSON.parse(require(`fs`).readFileSync(f, `utf8`)); if (Object.keys({ ...p.dependencies, ...p.optionalDependencies }).length === 0) process.exit(1); delete p.devDependencies; require(`fs`).writeFileSync(f, JSON.stringify(p, null, 2))' (Join-Path $Extract 'package.json')
+      if ($LASTEXITCODE -eq 0) {
+        $nodeDir = Split-Path -Parent $Node
+        $npmCli = @(
+          (Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'),
+          (Join-Path $nodeDir '../lib/node_modules/npm/bin/npm-cli.js')
+        ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $npmCli) { Stop-Install "$Tgz has dependencies, and there is no npm next to $Node" }
+        Push-Location -LiteralPath $Extract
+        try {
+          & $Node $npmCli install --omit=dev --ignore-scripts --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine($_) }
+          $npmStatus = $LASTEXITCODE
+        } finally {
+          Pop-Location
+        }
+        if ($npmStatus -ne 0) { Stop-Install "npm install failed for $Tgz" }
+      }
       if (Test-Path -LiteralPath $BundleDir) { Remove-Item -Recurse -Force -LiteralPath $BundleDir }
       Move-Item -LiteralPath $Extract -Destination $BundleDir
     } finally {
       Remove-Item -Recurse -Force -LiteralPath $Tmp -ErrorAction SilentlyContinue
+      if ($Extract -and (Test-Path -LiteralPath $Extract)) { Remove-Item -Recurse -Force -LiteralPath $Extract -ErrorAction SilentlyContinue }
     }
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -167,9 +186,29 @@ try {
     $Cmd = Join-Path $Dir "$BinName.cmd"
 
     $ps1 = @(
+      '$sccapturePrevious = $env:SCCAPTURE_INSTALL_DIR',
       "`$env:SCCAPTURE_INSTALL_DIR = $(Get-Quoted $Dir)",
-      "& $(Get-Quoted $Node) $(Get-Quoted $Entry) @args",
-      'exit $LASTEXITCODE',
+      '$sccaptureProxy = $env:NODE_USE_ENV_PROXY',
+      'if ($null -eq $sccaptureProxy) { $env:NODE_USE_ENV_PROXY = ''1'' }',
+      '$sccaptureMode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue',
+      '$sccaptureArgs = @(foreach ($sccaptureArg in $args) {',
+      '  $sccaptureText = "$sccaptureArg"',
+      '  if ($null -ne $sccaptureMode -and "$sccaptureMode" -ne ''Legacy'') { $sccaptureText }',
+      '  elseif ($sccaptureText -eq '''') { ''""'' }',
+      '  else {',
+      '    $sccaptureText = $sccaptureText -replace ''(\\*)"'', ''$1$1\"''',
+      '    if ($PSVersionTable.PSEdition -ne ''Core'' -and $sccaptureText -match ''\s'') { $sccaptureText -replace ''(\\+)$'', ''$1$1'' } else { $sccaptureText }',
+      '  }',
+      '})',
+      '$sccaptureStatus = 1',
+      'try {',
+      "  & $(Get-Quoted $Node) $(Get-Quoted $Entry) @sccaptureArgs",
+      '  $sccaptureStatus = $LASTEXITCODE',
+      '} finally {',
+      '  if ($null -eq $sccapturePrevious) { Remove-Item -LiteralPath Env:SCCAPTURE_INSTALL_DIR -ErrorAction SilentlyContinue } else { $env:SCCAPTURE_INSTALL_DIR = $sccapturePrevious }',
+      '  if ($null -eq $sccaptureProxy) { Remove-Item -LiteralPath Env:NODE_USE_ENV_PROXY -ErrorAction SilentlyContinue }',
+      '}',
+      'exit $sccaptureStatus',
       ''
     ) -join "`r`n"
     [System.IO.File]::WriteAllText($Launcher, $ps1, (New-Object System.Text.UTF8Encoding $true))
@@ -181,11 +220,8 @@ try {
       'for /f "tokens=2 delims=:." %%c in (''chcp'') do set "SCCAPTURE_CP=%%c"',
       'chcp 65001 >nul',
       "set `"SCCAPTURE_INSTALL_DIR=$(& $escape $Dir)`"",
-      '(',
-      "`"$(& $escape $Node)`" `"$(& $escape $Entry)`" %*",
-      'call :done %%ERRORLEVEL%%',
-      'exit /b',
-      ')',
+      'if not defined NODE_USE_ENV_PROXY set "NODE_USE_ENV_PROXY=1"',
+      "`"$(& $escape $Node)`" `"$(& $escape $Entry)`" %* & call :done %%ERRORLEVEL%% & call exit /b %%ERRORLEVEL%%",
       ':done',
       'chcp %SCCAPTURE_CP% >nul',
       'exit /b %1',
@@ -205,7 +241,13 @@ try {
       if ($parts -notcontains $Dir) {
         [System.Environment]::SetEnvironmentVariable('Path', (@($parts) + $Dir) -join ';', 'User')
         Write-Output "Added $Dir to your user PATH; open a new terminal to use $BinName"
+        Write-Output "To undo: [Environment]::SetEnvironmentVariable('Path', (([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -ne $(Get-Quoted $Dir)) -join ';', 'User')"
       }
+    }
+
+    $policy = "$(Get-ExecutionPolicy)"
+    if (@('Restricted', 'AllSigned', 'Undefined') -contains $policy) {
+      [Console]::Error.WriteLine("install.ps1: the execution policy is $policy, so PowerShell won't run $BinName.ps1; run Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, or use $BinName.cmd")
     }
   }
 } catch {

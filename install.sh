@@ -5,7 +5,6 @@ BIN_NAME="sccapture"
 PACKAGE="slicc-capture"
 REPO="ai-ecoverse/slicc-capture"
 MIN_NODE=24
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$PACKAGE"
 
 usage() {
   printf 'usage: install.sh [--version VERSION] [--dir DIR] [--help]\n'
@@ -27,7 +26,8 @@ usage_error() {
 }
 
 VERSION=""
-INSTALL_DIR="$HOME/.local/bin"
+INSTALL_DIR=""
+DIR_GIVEN=""
 BASE_URL="${SLICC_INSTALL_BASE_URL:-}"
 NODE_DIST_BASE="${SLICC_NODE_DIST_BASE:-https://nodejs.org/dist}"
 
@@ -35,17 +35,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version|--dir)
       [ $# -ge 2 ] || usage_error "$1 needs a value"
-      if [ "$1" = --version ]; then VERSION="${2#v}"; else INSTALL_DIR="$2"; fi
+      if [ "$1" = --version ]; then VERSION="${2#v}"; else INSTALL_DIR="$2"; DIR_GIVEN=1; fi
       shift 2
       ;;
     --version=*) VERSION="${1#--version=}"; VERSION="${VERSION#v}"; shift ;;
-    --dir=*) INSTALL_DIR="${1#--dir=}"; shift ;;
+    --dir=*) INSTALL_DIR="${1#--dir=}"; DIR_GIVEN=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) usage_error "unknown option $1" ;;
   esac
 done
 
-[ -n "$INSTALL_DIR" ] || usage_error "--dir needs a value"
+[ -z "$DIR_GIVEN" ] || [ -n "$INSTALL_DIR" ] || usage_error "--dir needs a value"
+if [ -z "${HOME:-}" ] && { [ -z "$DIR_GIVEN" ] || [ -z "${XDG_DATA_HOME:-}" ]; }; then
+  die "HOME is not set; give --dir and set XDG_DATA_HOME"
+fi
+[ -n "$DIR_GIVEN" ] || INSTALL_DIR="$HOME/.local/bin"
+DATA_DIR="${XDG_DATA_HOME:-${HOME:-}/.local/share}/$PACKAGE"
 
 detect_os() {
   case "$(uname -s)" in
@@ -175,7 +180,8 @@ fi
 BASE_URL="${BASE_URL%/}"
 
 TMP_INSTALL="$(mktemp -d)"
-trap 'rm -rf "$TMP_INSTALL"' EXIT
+EXTRACT=""
+trap 'rm -rf "$TMP_INSTALL" ${EXTRACT:+"$EXTRACT"}' EXIT
 
 fetch "$BASE_URL/SHA256SUMS" "$TMP_INSTALL/SHA256SUMS"
 if [ -n "$VERSION" ]; then
@@ -197,6 +203,17 @@ mkdir -p "$EXTRACT"
 tar xzf "$TMP_INSTALL/$TGZ" -C "$EXTRACT" --strip-components=1
 ENTRY="$BUNDLE_DIR/host/$BIN_NAME.mjs"
 [ -f "$EXTRACT/host/$BIN_NAME.mjs" ] || die "$TGZ has no host/$BIN_NAME.mjs"
+if "$NODE_ABS" -e 'const f = process.argv[1]; const p = JSON.parse(require("fs").readFileSync(f, "utf8")); if (Object.keys({ ...p.dependencies, ...p.optionalDependencies }).length === 0) process.exit(1); delete p.devDependencies; require("fs").writeFileSync(f, JSON.stringify(p, null, 2))' "$EXTRACT/package.json"; then
+  NODE_DIR="$(dirname "$NODE_ABS")"
+  NPM_CLI="$NODE_DIR/../lib/node_modules/npm/bin/npm-cli.js"
+  if [ -f "$NPM_CLI" ]; then
+    (cd "$EXTRACT" && PATH="$NODE_DIR:$PATH" "$NODE_ABS" "$NPM_CLI" install --omit=dev --ignore-scripts --no-audit --no-fund >&2) || die "npm install failed for $TGZ"
+  elif command -v npm >/dev/null 2>&1; then
+    (cd "$EXTRACT" && PATH="$NODE_DIR:$PATH" npm install --omit=dev --ignore-scripts --no-audit --no-fund >&2) || die "npm install failed for $TGZ"
+  else
+    die "$TGZ has dependencies, and there is no npm next to $NODE_ABS or on PATH"
+  fi
+fi
 rm -rf "$BUNDLE_DIR"
 mv "$EXTRACT" "$BUNDLE_DIR"
 
@@ -208,6 +225,8 @@ LAUNCHER_TMP="$LAUNCHER.tmp.$$"
   printf '#!/bin/sh\n'
   printf 'SCCAPTURE_INSTALL_DIR=%s\n' "$(quoted "$INSTALL_DIR")"
   printf 'export SCCAPTURE_INSTALL_DIR\n'
+  printf ": \"\${NODE_USE_ENV_PROXY=1}\"\\n"
+  printf 'export NODE_USE_ENV_PROXY\n'
   printf 'exec %s %s "$@"\n' "$(quoted "$NODE_ABS")" "$(quoted "$ENTRY")"
 } > "$LAUNCHER_TMP"
 chmod 755 "$LAUNCHER_TMP"

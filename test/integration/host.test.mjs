@@ -14,17 +14,20 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { run } from '../../host/capture.mjs';
+import { fakeExe } from './fake-windows.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'slicc-capture-host-')));
 const usage =
   'usage: sccapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n';
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+const onWindows = process.platform === 'win32';
+const posix = { skip: onWindows && 'needs POSIX fakes' };
 
-after(() => rmSync(scratch, { recursive: true, force: true }));
+after(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 20 }));
 
 const shooters = ['screencapture', 'grim', 'gnome-screenshot', 'import', 'scrot'];
 
@@ -44,6 +47,7 @@ for (const arg of argv) {
     if (arg.endsWith('install.ps1')) call.file = fs.readFileSync(arg, 'utf8');
   } catch {}
 }
+if (argv.includes('-File')) call.modules = process.env.PSModulePath ?? null;
 fs.appendFileSync(path.join(process.env.FAKE_LOG, 'calls'), JSON.stringify(call) + '\\n');
 const fail = (process.env.FAKE_FAIL ?? '').split('|').find((rule) => rule.startsWith(name + ':'));
 if (fail !== undefined) {
@@ -63,6 +67,10 @@ if (process.env.FAKE_INSTALLED && argv.includes('-File')) process.stdout.write('
 function bin(names) {
   const dir = mkdtempSync(join(scratch, 'bin-'));
   for (const name of names) {
+    if (onWindows) {
+      fakeExe(dir, name, fake(name));
+      continue;
+    }
     writeFileSync(join(dir, name), fake(name));
     chmodSync(join(dir, name), 0o755);
   }
@@ -84,12 +92,21 @@ function base(path) {
   return env;
 }
 
-async function capture({ platform, names = [], argv, extra = {}, entry, path = (dir) => dir }) {
+async function capture({
+  platform,
+  names = [],
+  argv,
+  extra = {},
+  entry,
+  timeout,
+  path = (dir) => dir,
+}) {
   const dir = bin(names);
   const log = mkdtempSync(join(scratch, 'log-'));
   const out = join(log, 'out');
   const err = join(log, 'err');
-  const fds = [openSync('/dev/null', 'r'), openSync(out, 'w'), openSync(err, 'w')];
+  writeFileSync(join(log, 'in'), '');
+  const fds = [openSync(join(log, 'in'), 'r'), openSync(out, 'w'), openSync(err, 'w')];
   const env = { ...base(path(dir)), FAKE_LOG: log, ...extra };
   if (env.PATH === undefined) env.PATH = path(dir);
   if (platform === 'win32') {
@@ -102,10 +119,10 @@ async function capture({ platform, names = [], argv, extra = {}, entry, path = (
     writeFileSync(join(log, 'calls'), '', { flag: 'a' });
   };
   const files = (name) => join(log, name);
-  const args = argv.map((arg) => arg.replace(/^@/, `${log}/`));
+  const args = argv.map((arg) => arg.replace(/^@/, `${log}${sep}`));
   let code;
   try {
-    code = await run({ argv: args, env, platform, fds, wait, entry });
+    code = await run({ argv: args, env, platform, fds, wait, entry, timeout });
   } finally {
     for (const fd of fds) closeSync(fd);
   }
@@ -231,7 +248,7 @@ describe('the options', () => {
   });
 });
 
-describe('macOS', () => {
+describe('macOS', posix, () => {
   const mac = (argv, extra) =>
     capture({ platform: 'darwin', names: ['screencapture'], argv, extra });
 
@@ -363,7 +380,7 @@ describe('macOS', () => {
 const x11 = ['gnome-screenshot', 'import', 'scrot'];
 const wayland = { WAYLAND_DISPLAY: 'wayland-1' };
 
-describe('Linux', () => {
+describe('Linux', posix, () => {
   const linux = (names, argv, extra) => capture({ platform: 'linux', names, argv, extra });
   const argvOf = async (name, argv, extra) => {
     const result = await linux([name, 'slurp', 'xdg-open'], argv, extra);
@@ -706,7 +723,7 @@ describe('Windows', () => {
       ]);
       assert.equal(call.argv.length, 5);
       assert.deepEqual(call.env, {
-        SCCAPTURE_FILE: `${result.log}/f.png`,
+        SCCAPTURE_FILE: join(result.log, 'f.png'),
         SCCAPTURE_FORMAT: 'png',
         SCCAPTURE_SCREEN: 'all',
       });
@@ -717,7 +734,7 @@ describe('Windows', () => {
   it('keeps the file name and values out of the script', async () => {
     const result = await win(
       ['powershell.exe'],
-      ['-C', '-R', '1,2,3,4', "@x'; Remove-Item C:\\ $(evil).png"],
+      ['-C', '-R', '1,2,3,4', "@x'; Remove-Item $(evil) & ^ %PATH%.png"],
       {
         SCCAPTURE_RECT: 'stale',
       }
@@ -735,7 +752,7 @@ describe('Windows', () => {
     assert.equal(result.calls[0].env.SCCAPTURE_RECT, '1,2,3,4');
     assert.equal(
       result.calls[0].env.SCCAPTURE_FILE,
-      `${result.log}/x'; Remove-Item C:\\ $(evil).png`
+      join(result.log, "x'; Remove-Item $(evil) & ^ %PATH%.png")
     );
   });
 
@@ -858,7 +875,7 @@ describe('--upgrade', () => {
     );
   });
 
-  it('runs the latest install.sh with --dir and prints old → new', async () => {
+  it('runs the latest install.sh with --dir and prints old → new', posix, async () => {
     const log = join(mkdtempSync(join(scratch, 'up-')), 'args');
     const at = installer(
       `printf '%s\\n' "$@" "\${SCCAPTURE_INSTALL_DIR:-unset}" > '${log}'\necho progress >&2\necho 'sccapture 99.1.0 installed to /x/sccapture'`
@@ -878,7 +895,7 @@ describe('--upgrade', () => {
     assert.deepEqual(readFileSync(log, 'utf8').split('\n'), ['--dir', '/opt/my bin', 'unset', '']);
   });
 
-  it('says when it is already up to date', async () => {
+  it('says when it is already up to date', posix, async () => {
     const at = installer(`echo 'sccapture ${version} installed to /x/sccapture'`);
     const result = await capture({
       platform: 'darwin',
@@ -891,7 +908,7 @@ describe('--upgrade', () => {
     );
   });
 
-  it('passes a failing installer stderr through and exits 1', async () => {
+  it('passes a failing installer stderr through and exits 1', posix, async () => {
     for (const [body, stderr] of [
       ['echo broken >&2; exit 5', 'broken\n'],
       ['echo nothing useful', 'sccapture: install.sh did not say which version it installed\n'],
@@ -935,6 +952,10 @@ describe('--upgrade', () => {
     });
     assert.equal(noShell.code, 1);
     assert.equal(noShell.stderr, 'sccapture: no shell found to run install.sh (tried sh)\n');
+  });
+
+  it('exits 1 when sh cannot run the installer', posix, async () => {
+    const at = installer('exit 0');
     const broken = await capture({
       platform: 'linux',
       names: ['sh'],
@@ -942,6 +963,51 @@ describe('--upgrade', () => {
       extra: { SCCAPTURE_INSTALL_DIR: '/d', SLICC_INSTALL_BASE_URL: at },
     });
     assert.equal(broken.code, 1);
+  });
+
+  it('gives up on a download that never answers, after the timeout', async () => {
+    const sockets = new Set();
+    const silent = createServer(() => {});
+    silent.on('connection', (socket) => sockets.add(socket));
+    await new Promise((done) => silent.listen(0, '127.0.0.1', done));
+    try {
+      for (const [prefix, body] of [
+        ['headers', false],
+        ['body', true],
+      ]) {
+        if (body) {
+          silent.removeAllListeners('request');
+          silent.on('request', (request, response) => {
+            response.writeHead(200);
+            response.write('#!/bin/sh\n');
+          });
+        }
+        const started = Date.now();
+        const result = await capture({
+          platform: 'linux',
+          names: ['sh'],
+          argv: ['--upgrade'],
+          timeout: 300,
+          extra: {
+            SCCAPTURE_INSTALL_DIR: '/d',
+            SLICC_INSTALL_BASE_URL: `http://127.0.0.1:${silent.address().port}/${prefix}`,
+          },
+        });
+        assert.deepEqual(
+          [result.code, result.stdout, result.stderr],
+          [1, '', 'sccapture: download timed out\n']
+        );
+        assert.ok(Date.now() - started < 5000);
+        assert.deepEqual(result.calls, []);
+      }
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      silent.close();
+    }
+  });
+
+  it('waits 60 seconds for the download by default', () => {
+    assert.match(readFileSync(join(root, 'host/capture.mjs'), 'utf8'), /timeout = 60000,/);
   });
 
   it('runs install.ps1 with -Dir through PowerShell on Windows', async () => {
@@ -954,6 +1020,7 @@ describe('--upgrade', () => {
         SCCAPTURE_INSTALL_DIR: 'C:\\Users\\me\\bin',
         SLICC_INSTALL_BASE_URL: `${url}/win`,
         FAKE_INSTALLED: '99.2.0',
+        PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules',
       },
     });
     assert.equal(result.code, 0, result.stderr);
@@ -971,6 +1038,7 @@ describe('--upgrade', () => {
     assert.deepEqual(call.argv.slice(6), ['-Dir', 'C:\\Users\\me\\bin']);
     assert.equal(call.file, 'param($Dir)');
     assert.equal(call.env.SCCAPTURE_INSTALL_DIR, undefined);
+    assert.equal(call.modules, null);
     const none = await capture({
       platform: 'win32',
       argv: ['--upgrade'],

@@ -18,6 +18,7 @@ export async function run({
   fds = [0, 1, 2],
   entry = fileURLToPath(new URL('sccapture.mjs', import.meta.url)),
   wait = (seconds) => setTimeout(seconds * 1000),
+  timeout = 60000,
 } = {}) {
   const os = names[platform] ? platform : 'linux';
   const parsed = parse(argv);
@@ -34,7 +35,8 @@ export async function run({
       say(fds[2], `sccapture: ${parsed.special[0]}: takes no other arguments\n${usage}`);
       return 2;
     }
-    if (parsed.special[0] === '--upgrade') return upgrade({ entry, env, platform: os, fds });
+    if (parsed.special[0] === '--upgrade')
+      return upgrade({ entry, env, platform: os, fds, timeout });
     const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8'));
     say(fds[1], `${pkg.version}\n`);
     return 0;

@@ -33,6 +33,15 @@ describe('the repository', () => {
     assert.match(ci, /^\s*review-prompt: \|\n\s+SLICC-CAPTURE$/m);
     const glob = /^\s*test-glob:\s*(\S+)$/m.exec(ci)?.[1];
     assert.ok(glob && pkg.scripts.test.endsWith(` ${glob}`), pkg.scripts.test);
+    assert.match(ci, /^ {6}windows-test: npm run test:windows$/m);
+    assert.match(
+      pkg.scripts['test:windows'],
+      /^node --test --test-concurrency=1 .* test\/integration\/host\.test\.mjs test\/integration\/windows\.test\.mjs$/
+    );
+    const [major, minor] = pkg.devDependencies['@ai-ecoverse/slicc-shared-web']
+      .split('.')
+      .map(Number);
+    assert.ok(major === 2 && minor >= 12, 'windows-test needs slicc-shared-web 2.12.0 or later');
   });
 
   it('pins every devDependency exactly', () => {
@@ -85,7 +94,12 @@ describe('the repository', () => {
     assert.ok(names.indexOf('@semantic-release/exec') < names.indexOf('@semantic-release/github'));
     assert.deepEqual(
       plugin('@semantic-release/github')[1].assets.map((asset) => asset.path),
-      ['release/slicc-capture-*.tgz', 'release/SHA256SUMS', 'install.sh', 'install.ps1']
+      [
+        'release/slicc-capture-*.tgz',
+        'release/SHA256SUMS',
+        'release/install.sh',
+        'release/install.ps1',
+      ]
     );
     assert.ok(existsSync(join(root, 'install.sh')));
     assert.ok(existsSync(join(root, 'install.ps1')));
