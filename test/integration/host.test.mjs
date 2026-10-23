@@ -420,6 +420,22 @@ describe('Linux', () => {
       );
     }
     assert.deepEqual(await argvOf('scrot', ['-t', 'jpg', '@f.JPG']), ['-o', '@/f.JPG']);
+    for (const file of ['f.jpg', 'f.JPEG']) {
+      assert.deepEqual(await argvOf('grim', [`@${file}`], wayland), ['-t', 'jpeg', `@/${file}`]);
+    }
+    assert.deepEqual(await argvOf('grim', ['-t', 'png', '@f.jpg'], wayland), [
+      '-t',
+      'png',
+      '@/f.jpg',
+    ]);
+    assert.deepEqual(await argvOf('grim', ['@f.webp'], wayland), ['@/f.webp']);
+    const clip = await capture({
+      platform: 'linux',
+      names: ['grim', 'wl-copy'],
+      argv: ['-c', '@f.jpg'],
+      extra: wayland,
+    });
+    assert.deepEqual(clip.calls[0].argv.length, 1);
   });
 
   it('selects a region with slurp for grim', async () => {

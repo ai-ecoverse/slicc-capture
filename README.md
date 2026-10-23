@@ -164,7 +164,7 @@ How each option reaches the tool. "Not with `<tool>`" is the error only when no 
 | `-R x,y,w,h` | `-g "x,y wxh"` | not with `gnome-screenshot` | `-crop wxh+x+y +repage` | `-a x,y,w,h` |
 | `-C` | `-c` | `-p` | not with `import` | `-p` |
 | `-l <windowid>` | not with `grim` | not with `gnome-screenshot` | `-window <windowid>` | not with `scrot` |
-| `-t png`, `jpg` | `-t png`, `-t jpeg` | `png` only, else not with `gnome-screenshot` | `png:<file>`, `jpg:<file>` | by the file's extension; a `-t` that differs from it is not with `scrot` |
+| `-t png`, `jpg` | `-t png`, `-t jpeg`; without `-t`, `-t jpeg` for a `.jpg` or `.jpeg` file, since grim writes PNG whatever the extension | `png` only, else not with `gnome-screenshot` | `png:<file>`, `jpg:<file>` | by the file's extension; a `-t` that differs from it is not with `scrot` |
 
 Under Wayland, `grim` needs a compositor with wlr-screencopy (sway, Hyprland and other wlroots ones); elsewhere it fails with its own message, so install `gnome-screenshot` there. `import` and `scrot` aren't tried under Wayland, where they would see only XWayland windows.
 

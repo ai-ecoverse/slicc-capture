@@ -10,7 +10,9 @@ const builders = {
     if (o.window) return { unsupported: o.windowLabel };
     if (o.id) return { unsupported: '-l' };
     const args = o.cursor ? ['-c'] : [];
-    if (o.type) args.push('-t', o.type === 'png' ? 'png' : 'jpeg');
+    const type = o.type ?? extensions[extname(file).toLowerCase()];
+    if (o.type === 'png') args.push('-t', 'png');
+    else if (type === 'jpg') args.push('-t', 'jpeg');
     if (o.rect) {
       const [x, y, w, h] = o.rect;
       args.push('-g', `${x},${y} ${w}x${h}`);
