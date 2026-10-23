@@ -1,0 +1,310 @@
+#!/bin/sh
+me=${0##*/}
+dev=/dev/embedder
+usage() {
+  printf 'usage: %s [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n' "$me"
+}
+say() {
+  printf '%s: %s\n' "$me" "$1" >&2
+}
+bad() {
+  say "$1"
+  usage >&2
+  exit 2
+}
+refuse() {
+  say "$1"
+  exit 2
+}
+die() {
+  say "$1"
+  exit 1
+}
+first() {
+  [ -n "$problem" ] || problem=$1
+}
+num() {
+  n=$1
+  while :; do
+    case $n in
+      0[0-9]*) n=${n#0} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$n"
+}
+digits() {
+  case $1 in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+}
+delay() {
+  case $1 in
+    '' | .* | *. | *.*.* | *[!0-9.]*) return 1 ;;
+  esac
+}
+rect() {
+  case $1 in
+    *,*,*,*,*) return 1 ;;
+    *,*,*,*) ;;
+    *) return 1 ;;
+  esac
+  rx=${1%%,*}
+  rest=${1#*,}
+  ry=${rest%%,*}
+  rest=${rest#*,}
+  rw=${rest%%,*}
+  rh=${rest#*,}
+  digits "$rx" && digits "$ry" && digits "$rw" && digits "$rh" || return 1
+  [ "$(num "$rw")" != 0 ] && [ "$(num "$rh")" != 0 ]
+}
+format() {
+  case $1 in
+    [pP][nN][gG]) printf png ;;
+    [jJ][pP][gG] | [jJ][pP][eE][gG]) printf jpeg ;;
+    [wW][eE][bB][pP]) printf webp ;;
+  esac
+}
+value() {
+  case $1 in
+    T)
+      delay "$2" || first "-T: invalid delay: $2"
+      wait=$2
+      ;;
+    R)
+      rect "$2" || first "-R: invalid rectangle: $2"
+      area=$2
+      ;;
+    D)
+      case $2 in
+        [1-9]*) digits "$2" || first "-D: invalid display: $2" ;;
+        *) first "-D: invalid display: $2" ;;
+      esac
+      surface=monitor
+      ;;
+    J)
+      case $2 in
+        window) surface=window ;;
+        selection | video) style=${style:-"-J $2: not supported in SLICC"} ;;
+        *) first "-J: invalid style: $2" ;;
+      esac
+      ;;
+    t) type=$2 ;;
+    *) off=${off:-"-$1"} ;;
+  esac
+}
+flag() {
+  case $1 in
+    c) clip=1 ;;
+    C) cursor=always ;;
+    v) view=1 ;;
+    m) surface=monitor ;;
+    w | W) surface=window ;;
+    a | d | i | o | r | x) ;;
+    *) off=${off:-"-$1"} ;;
+  esac
+}
+version() {
+  while IFS= read -r line; do
+    case $line in
+      *'"version": "'*)
+        line=${line#*'"version": "'}
+        printf '%s\n' "${line%%\"*}"
+        return
+        ;;
+    esac
+  done <"${0%/*}/../package.json"
+}
+relay() {
+  while IFS= read -r line; do
+    case $line in
+      *": $dev: "*) printf '%s\n' "${line#*": $dev: "}" >"$work/message" ;;
+      *": printf: write error: "*) printf '%s\n' "${line##*: }" >"$work/header" ;;
+      "cat: -: "* | "cat: write error: "*) printf '%s\n' "${line##*: }" >"$work/errno" ;;
+      *) printf '%s: %s\n' "$me" "${line#*: }" >&2 ;;
+    esac
+  done
+}
+ask() {
+  rm -f "$work/message" "$work/header" "$work/errno"
+  { { "$@"; } 2>&1 >&5 | relay; } 5>&1 &
+  wait "$!"
+  header=
+  errno=
+  message=
+  [ ! -f "$work/header" ] || header=$(cat "$work/header")
+  [ ! -f "$work/errno" ] || errno=$(cat "$work/errno")
+  [ ! -f "$work/message" ] || message=$(cat "$work/message")
+  errno=${errno:-$header}
+  [ -z "$errno" ]
+}
+because() {
+  printf '%s' "${message:-$errno}"
+}
+copyfail() {
+  case $header in
+    "Not supported") die "failed to copy to clipboard: this page does not copy images (no clipboard.write)" ;;
+  esac
+  die "failed to copy to clipboard: $(because)"
+}
+stop() {
+  [ ! -s "$work/pid" ] || kill -TERM "$(cat "$work/pid")" 2>/dev/null
+  wait
+  say interrupted
+  exit $((128 + $1))
+}
+absolute() {
+  case $1 in
+    */*) dir=${1%/*} base=${1##*/} ;;
+    *) dir=. base=$1 ;;
+  esac
+  dir=$(cd -- "${dir:-/}" && pwd)
+  printf '%s/%s' "${dir%/}" "$base"
+}
+cleanup() {
+  rm -rf "$work"
+}
+argc=$#
+clip=
+view=
+cursor=never
+surface=
+wait=
+area=
+type=
+style=
+off=
+problem=
+wrong=
+special=
+help=
+ended=
+files=0
+file=
+while [ $# -gt 0 ]; do
+  arg=$1
+  shift
+  if [ -n "$ended" ]; then
+    files=$((files + 1))
+    file=${file:-$arg}
+    continue
+  fi
+  case $arg in
+    --) ended=1 ;;
+    --help) help=1 ;;
+    --version | --upgrade) special=${special:-$arg} ;;
+    --clipboard) clip=1 ;;
+    --view) view=1 ;;
+    --*) wrong=${wrong:-"unknown option: $arg"} ;;
+    -?*)
+      rest=${arg#-}
+      while [ -n "$rest" ]; do
+        letter=${rest%"${rest#?}"}
+        rest=${rest#?}
+        case $letter in
+          h) help=1 ;;
+          [BDGJlRtTV])
+            if [ -n "$rest" ]; then
+              value "$letter" "$rest"
+            elif [ $# -gt 0 ]; then
+              value "$letter" "$1"
+              shift
+            else
+              wrong=${wrong:-"-$letter: option requires a value"}
+            fi
+            rest=
+            ;;
+          [abcCdgikmMoprPsSuUvwWx]) flag "$letter" ;;
+          *)
+            wrong=${wrong:-"unknown option: -$letter"}
+            rest=
+            ;;
+        esac
+      done
+      ;;
+    *)
+      files=$((files + 1))
+      file=${file:-$arg}
+      ;;
+  esac
+done
+if [ -n "$help" ]; then
+  usage
+  exit 0
+fi
+[ -z "$wrong" ] || bad "$wrong"
+if [ -n "$special" ]; then
+  [ "$argc" -eq 1 ] || bad "$special: takes no other arguments"
+  if [ "$special" = --upgrade ]; then
+    printf 'pnpm add -g @ai-ecoverse/slicc-capture@latest\n'
+  else
+    version
+  fi
+  exit 0
+fi
+[ -z "$off" ] || refuse "$off: not supported in SLICC"
+[ -z "$problem" ] || refuse "$problem"
+[ -z "$style" ] || refuse "$style"
+mime=png
+if [ -n "$clip" ]; then
+  file=
+  files=0
+elif [ -n "$type" ]; then
+  mime=$(format "$type")
+  [ -n "$mime" ] || refuse "-t $type: not supported in SLICC"
+else
+  case $file in
+    *.[jJ][pP][gG] | *.[jJ][pP][eE][gG]) mime=jpeg ;;
+    *.[wW][eE][bB][pP]) mime=webp ;;
+  esac
+fi
+[ "$files" -le 1 ] || refuse "more than one file: not supported in SLICC"
+[ -n "$file" ] || [ -n "$clip" ] || [ -n "$view" ] || bad "output file required (or use -c for clipboard)"
+[ -c "$dev" ] || die "$dev not available (needs slicc-kernel >= 1.153.0)"
+request="{\"kind\":\"capture.screen\",\"type\":\"image/$mime\""
+[ "$mime" = png ] || request="$request,\"quality\":0.92"
+request="$request,\"cursor\":\"$cursor\""
+[ -z "$surface" ] || request="$request,\"surface\":\"$surface\""
+[ -z "$wait" ] || request="$request,\"delay\":$(num "${wait%%.*}")${wait#"${wait%%.*}"}"
+[ -z "$area" ] || request="$request,\"rect\":{\"x\":$(num "$rx"),\"y\":$(num "$ry"),\"width\":$(num "$rw"),\"height\":$(num "$rh")}"
+request="$request}"
+work=$(mktemp -d)
+trap cleanup EXIT
+trap 'stop 1' HUP
+trap 'stop 2' INT
+trap 'stop 15' TERM
+if [ -n "$clip" ]; then
+  exec 4<>"$dev"
+  ask sh -c "printf '%s\\n' \"\$1\" >&4" sh '{"kind":"clipboard.write","type":"image/png"}' || copyfail
+fi
+exec 3<>"$dev"
+if ! ask sh -c "printf '%s\\n' \"\$1\" >&3 || exit 1; cat <&3 & echo \$! >\"\$2\"; wait \$!" sh "$request" "$work/pid" >"$work/image"; then
+  case $header in
+    "Not supported") die "browser APIs are unavailable in this environment" ;;
+  esac
+  case $errno in
+    "Permission denied") die "user cancelled, permission denied, or the surface is protected" ;;
+    "Not supported") die "${message:-screen capture is not supported in this browser}" ;;
+  esac
+  die "$(because)"
+fi
+exec 3<&-
+size=$(wc -c <"$work/image")
+[ "$size" -gt 0 ] || die "the page sent no image"
+kb=$(((size + 512) / 1024))
+if [ -n "$clip" ]; then
+  ask cat "$work/image" >&4 || copyfail
+  ask sh -c 'cat <&4' >/dev/null || copyfail
+  exec 4<&-
+  printf 'captured %s KB to clipboard\n' "$kb"
+fi
+if [ -z "$file" ]; then
+  [ -n "$view" ] || exit 0
+  file=$(mktemp "${TMPDIR:-/tmp}/screencapture-XXXXXX.$mime")
+fi
+err=$(tee -- "$file" <"$work/image" 2>&1 >/dev/null) || die "failed to write file: ${err#tee: }"
+if [ -n "$view" ]; then
+  printf '<img:%s>\n' "$(absolute "$file")"
+elif [ -z "$clip" ]; then
+  printf 'captured %s KB to %s\n' "$kb" "$file"
+fi

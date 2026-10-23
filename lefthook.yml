@@ -7,3 +7,9 @@ pre-commit:
   jobs:
     - name: shared hooks
       run: test -f node_modules/@ai-ecoverse/slicc-shared-web/lefthook.yml || { echo 'slicc-shared-web hooks missing, run npm install'; exit 1; }
+    - name: shellcheck
+      glob: "bin/*"
+      run: shellcheck -s sh -e SC1091 {staged_files}
+    - name: script diff coverage
+      glob: "bin/*"
+      run: npm run --silent test:sh && npx --no-install slicc-diff-cover coverage/sh/lcov.info
