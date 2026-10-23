@@ -389,6 +389,37 @@ describe('on the kernel', () => {
     });
   });
 
+  it('stops before the request when it cannot make its temporary directory', async () => {
+    for (const name of names) {
+      page.calls = [];
+      const result = await sh(
+        `rm -rf /tmp/m && mkdir /tmp/m && cd /tmp/m && TMPDIR=/missing ${name} f.png; echo "$?"; ls -A /tmp/m; ls -d /header /image /pid 2>/dev/null; true`
+      );
+      assert.deepEqual(
+        result,
+        {
+          status: 0,
+          stdout: '1\n',
+          stderr: `${name}: failed to create a temporary directory in /missing\n`,
+        },
+        name
+      );
+      assert.deepEqual(page.calls, [], name);
+    }
+  });
+
+  it('writes nothing with -v when it cannot make the temporary file', async () => {
+    const result = await sh(
+      'rm -rf /tmp/fake /tmp/tmp.* /tmp/screencapture-*; mkdir /tmp/fake && printf \'#!/bin/sh\\n[ "$1" = -d ] && exec /usr/bin/mktemp -d\\nexit 1\\n\' >/tmp/fake/mktemp && chmod +x /tmp/fake/mktemp && PATH=/tmp/fake:$PATH screencapture -v; echo "$?"; ls -d /tmp/tmp.* /tmp/screencapture-* 2>/dev/null; rm -rf /tmp/fake; true'
+    );
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: '1\n',
+      stderr: 'screencapture: failed to create a temporary file in /tmp\n',
+    });
+    assert.equal(page.calls.length, 1);
+  });
+
   it('keeps an existing file when the capture fails', async () => {
     page.screen = () => {
       throw refusal('NotAllowedError', 'no');
