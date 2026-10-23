@@ -4,21 +4,26 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSyn
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(import.meta.dirname, '..');
+const here = resolve(import.meta.dirname, '..');
 
-export function releaseAssets(version, out = join(root, 'dist')) {
+export function releaseAssets(version, out = join(here, 'dist'), root = here) {
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   if (!version || version !== pkg.version) {
     throw new Error(`version ${version ?? '(none)'} is not package.json's ${pkg.version}`);
   }
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  const packed = JSON.parse(
+  const [pack] = JSON.parse(
     execFileSync('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', out], {
       cwd: root,
       encoding: 'utf8',
     })
-  )[0].filename;
+  );
+  if (!pack.files.some((file) => file.path === 'host/sccapture.mjs')) {
+    rmSync(out, { recursive: true, force: true });
+    throw new Error('the package has no host/sccapture.mjs, which the installers run');
+  }
+  const packed = pack.filename;
   const tarball = `slicc-capture-${version}.tgz`;
   renameSync(join(out, packed), join(out, tarball));
   for (const name of ['install.sh', 'install.ps1']) copyFileSync(join(root, name), join(out, name));

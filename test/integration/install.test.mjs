@@ -491,6 +491,33 @@ describe('install.sh', () => {
   });
 });
 
+describe('the release assets', () => {
+  it('install with install.sh, and the launcher runs the packed host/sccapture.mjs', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'slicc-capture-assets-')));
+    runs.push(dir);
+    const out = join(dir, 'releases', 'latest', 'download');
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    const built = spawnSync(
+      realNode,
+      [join(root, 'scripts/release-assets.mjs'), pkg.version, out],
+      {
+        cwd: root,
+        encoding: 'utf8',
+      }
+    );
+    assert.equal(built.status, 0, built.stderr);
+    const t = setup({ node: pkg.engines.node.replace('>=', '') + '.0.0' });
+    const run = t.run([], { SLICC_INSTALL_BASE_URL: pathToFileURL(join(dir, 'releases')).href });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(
+      run.stdout,
+      new RegExp(`^sccapture ${pkg.version.replace(/\./g, '\\.')} installed to `)
+    );
+    assert.equal(launch(t.launcher, ['--version']).stdout, `${pkg.version}\n`);
+    assert.equal(readlinkSync(join(t.data, 'current')), pkg.version);
+  });
+});
+
 const pwsh = find('pwsh');
 
 describe('install.ps1', { skip: pwsh ? false : 'pwsh is not installed' }, () => {
