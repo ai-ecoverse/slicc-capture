@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: read
+  issues: write
+  pull-requests: write
+  statuses: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.11.3
+    secrets: inherit
+    with:
+      test-glob: test/integration/*.test.mjs
+      shards: 1
+      review-prompt: |
+        SLICC-CAPTURE
+
+        This repository is slicc-capture (`@ai-ecoverse/slicc-capture`): `screencapture` and `sccapture` for SLICC, where the page captures a screen, window or tab with `getDisplayMedia` after a prompt, and `sccapture` for ordinary hosts as Node in `host/`, handing off to `screencapture` on macOS, grim, gnome-screenshot, ImageMagick `import` or scrot on Linux, and PowerShell on Windows. The README is the contract: read the sections the change touches first. `git diff origin/main...HEAD`, or `$RUNNER_TEMP/review/context/pr.diff`, is the change.
+
+        Look for real defects, in this order:
+        1. Correctness: every option of macOS `screencapture` does what the README's option table says in SLICC and on each platform, and the ones it lists as unsupported print `<cmd>: <opt>: not supported …` on stderr and exit 2; `host/` picks the tool and argv the README names, and never shadows the host's own `screencapture`; `--upgrade` and the installers behave as the README says.
+        2. Security: tools run with a fixed argv and no shell, file names and `-R`/`-l`/`-D` values never reach a shell or a PowerShell script as code, and the installers verify checksums.
+        3. Tests: every behaviour change has an integration test in `test/integration/`, host tests use fake tools on `PATH`, and a fix's test fails without the fix.
+        4. Repo rules: no comments anywhere (YAML too), no unit tests in git, no `.md` files besides README.md and AGENTS.md, and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
