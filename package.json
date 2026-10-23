@@ -11,6 +11,9 @@
   "engines": {
     "node": ">=24"
   },
+  "bin": {
+    "sccapture": "host/sccapture.mjs"
+  },
   "fledgling": {
     "provider": "github",
     "workflow": "ci.yml",
@@ -21,7 +24,14 @@
     "access": "public",
     "provenance": true
   },
-  "files": [],
+  "slicc": {
+    "unitSources": [
+      "host"
+    ]
+  },
+  "files": [
+    "host"
+  ],
   "scripts": {
     "prepare": "slicc-install-hooks",
     "lint": "slicc-lint",
