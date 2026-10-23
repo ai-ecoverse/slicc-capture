@@ -91,18 +91,25 @@ describe('the page module in Chrome', { skip }, () => {
     assert.deepEqual(result.lines, ['waiting for the picker…']);
   });
 
-  it('crops to the rectangle and encodes JPEG and WebP', async (t) => {
-    const rect = { x: 110, y: 10, width: 80, height: 50 };
+  const rect = { x: 110, y: 10, width: 80, height: 50 };
+
+  it('crops to the rectangle and encodes JPEG', async (t) => {
     const jpeg = await run(t, { options: { type: 'image/jpeg', quality: 0.92, rect } });
     assert.equal(jpeg.error, undefined, JSON.stringify(jpeg.error));
     assert.deepEqual(jpeg.magic.slice(0, 3), [0xff, 0xd8, 0xff]);
     assert.deepEqual(jpeg.size, [80, 50]);
     assert.ok(blue(jpeg.left), String(jpeg.left));
     assert.ok(blue(jpeg.right), String(jpeg.right));
+    assert.deepEqual(jpeg.states, ['ended']);
+  });
+
+  it('crops to the rectangle and encodes WebP', async (t) => {
     const webp = await run(t, { options: { type: 'image/webp', quality: 0.92, rect } });
     assert.equal(webp.error, undefined, JSON.stringify(webp.error));
     assert.deepEqual(webp.magic, [0x52, 0x49, 0x46, 0x46]);
     assert.deepEqual(webp.size, [80, 50]);
+    assert.ok(blue(webp.left), String(webp.left));
+    assert.deepEqual(webp.states, ['ended']);
   });
 
   it('falls back to a video element without ImageCapture', async (t) => {

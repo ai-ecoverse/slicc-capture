@@ -81,7 +81,10 @@ function setup(overrides = {}) {
 
 const requests = {
   kinds,
-  handle: (request) => fake.page.handle({ ...request, display: fake.display }),
+  handle: (request) => {
+    fake.signal = request.signal;
+    return fake.page.handle({ ...request, display: fake.display });
+  },
 };
 
 before(async () => {
@@ -236,11 +239,13 @@ describe('the page module', () => {
     });
     state.display = (constraints) =>
       new Promise((resolve) => {
+        state.signal.addEventListener('abort', () => {
+          setTimeout(async () => {
+            resolve(await display(constraints));
+            setTimeout(arrived, 50);
+          }, 50);
+        });
         setTimeout(() => os.sh('kill -INT "$(cat /tmp/main)"'), 200);
-        setTimeout(async () => {
-          resolve(await display(constraints));
-          setTimeout(arrived, 50);
-        }, 600);
       });
     const result = await sh('sh -c \'echo $$ >/tmp/main; exec screencapture f.png\'; echo "$?"');
     assert.equal(result.stdout, '130\n');
