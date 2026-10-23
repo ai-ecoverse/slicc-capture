@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
       exit 0
       ;;
     --version | --dir)
-      [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
+      if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi
       if [ "$1" = --version ]; then VERSION="$2"; else INSTALL_DIR="$2"; fi
       shift 2
       ;;
@@ -115,7 +115,7 @@ download_node() {
   if [ "$os" = linux ]; then
     musl=
     for f in /lib/ld-musl-*; do
-      [ -e "$f" ] && musl=1
+      if [ -e "$f" ]; then musl=1; fi
     done
     if [ -z "$musl" ] && command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
       musl=1
