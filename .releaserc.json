@@ -15,8 +15,8 @@
         "assets": [
           { "path": "release/slicc-capture-*.tgz" },
           { "path": "release/SHA256SUMS", "label": "SHA256SUMS" },
-          { "path": "install.sh", "label": "install.sh" },
-          { "path": "install.ps1", "label": "install.ps1" }
+          { "path": "release/install.sh", "label": "install.sh" },
+          { "path": "release/install.ps1", "label": "install.ps1" }
         ]
       }
     ]

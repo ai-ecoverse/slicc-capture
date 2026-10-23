@@ -15,13 +15,14 @@ function version(entry) {
   return JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')).version;
 }
 
-async function download(url) {
+async function download(url, timeout) {
   try {
-    const response = await fetch(url, { redirect: 'follow' });
-    if (!response.ok) return { error: `HTTP ${response.status}` };
+    const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeout) });
+    if (!response.ok) return { error: `could not download ${url}: HTTP ${response.status}` };
     return { text: await response.text() };
   } catch (error) {
-    return { error: error.cause?.message ?? error.message };
+    if (error.name === 'TimeoutError') return { error: 'download timed out' };
+    return { error: `could not download ${url}: ${error.cause?.message ?? error.message}` };
   }
 }
 
@@ -64,7 +65,7 @@ function wait(path, args, { env, stderr }) {
   });
 }
 
-export async function upgrade({ entry, env, platform, fds }) {
+export async function upgrade({ entry, env, platform, fds, timeout }) {
   const dir = env.SCCAPTURE_INSTALL_DIR;
   if (!dir) {
     say(fds[1], 'npm install -g @ai-ecoverse/slicc-capture@latest\n');
@@ -72,8 +73,8 @@ export async function upgrade({ entry, env, platform, fds }) {
   }
   const name = platform === 'win32' ? 'install.ps1' : 'install.sh';
   const url = `${(env.SLICC_INSTALL_BASE_URL || latest).replace(/\/+$/, '')}/${name}`;
-  const fetched = await download(url);
-  if (fetched.error) return fail(fds, `could not download ${url}: ${fetched.error}`);
+  const fetched = await download(url, timeout);
+  if (fetched.error) return fail(fds, fetched.error);
   const scratch = mkdtempSync(join(tmpdir(), 'sccapture-upgrade-'));
   try {
     const path = join(scratch, name);
@@ -85,6 +86,11 @@ export async function upgrade({ entry, env, platform, fds }) {
     }
     const child = { ...env };
     delete child.SCCAPTURE_INSTALL_DIR;
+    if (platform === 'win32') {
+      for (const key of Object.keys(child)) {
+        if (key.toUpperCase() === 'PSMODULEPATH') delete child[key];
+      }
+    }
     const result = await wait(run.tool.path, run.args, { env: child, stderr: fds[2] });
     if (result.error) return fail(fds, `${run.tool.file}: ${result.error.message}`);
     if (result.code !== 0) return 1;
