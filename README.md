@@ -93,7 +93,7 @@ Errors, on stderr, from slicc 6 where they still apply:
 | `screencapture: interrupted` (`SIGHUP`, `SIGINT` or `SIGTERM` during the request: the command stops the reader, so the page's `signal` aborts with `interrupted`, removes its temporary files and writes no file) | `128 + n` |
 | `screencapture: failed to write file: <file>: <message>` | 1 |
 | `screencapture: failed to create a temporary directory in <dir>` (before the request: `mktemp -d` failed in `$TMPDIR`, else `/tmp`; nothing is sent or written) | 1 |
-| `screencapture: failed to create a temporary file in <dir>` (`-v` without a file, after the capture: `mktemp` failed; the image is dropped and nothing is written) | 1 |
+| `screencapture: failed to create a temporary file in <dir>` (`-v` without a file, after the capture: `mktemp` failed; no file is written and no marker is printed; with `-c`, the clipboard copy has already been made) | 1 |
 | `screencapture: failed to copy to clipboard: this page does not copy images (no clipboard.write)` (`ENOTSUP`: no page answers `clipboard.write`) | 1 |
 | `screencapture: failed to copy to clipboard: <message>` (the page's message, else the errno's text) | 1 |
 | `screencapture: /dev/embedder not available (needs slicc-kernel >= 1.153.0)` (a kernel that runs the commands without the device) | 1 |
