@@ -429,6 +429,8 @@ describe('Linux', () => {
       '@/f.jpg',
     ]);
     assert.deepEqual(await argvOf('grim', ['@f.webp'], wayland), ['@/f.webp']);
+    assert.deepEqual(await argvOf('import', ['@shot']), ['-window', 'root', 'png:@/shot']);
+    assert.deepEqual(await argvOf('import', ['@f.webp']), ['-window', 'root', '@/f.webp']);
     const clip = await capture({
       platform: 'linux',
       names: ['grim', 'wl-copy'],
@@ -725,7 +727,9 @@ describe('Windows', () => {
     );
     const script = decoded(result.calls[0].argv);
     assert.doesNotMatch(script, /evil|Remove-Item|1,2,3,4/);
-    assert.match(script, /SetProcessDPIAware/);
+    assert.match(script, /\[SccaptureNative\]::Aware\(\)/);
+    assert.match(script, /SetProcessDpiAwarenessContext\(new IntPtr\(-4\)\)/);
+    assert.match(script, /SetProcessDPIAware\(\);/);
     assert.match(script, /CopyFromScreen/);
     assert.match(script, /DrawCursor/);
     assert.match(script, /\[System\.Windows\.Forms\.Clipboard\]::SetImage\(\$bitmap\)/);

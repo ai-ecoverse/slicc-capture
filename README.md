@@ -164,13 +164,13 @@ How each option reaches the tool. "Not with `<tool>`" is the error only when no 
 | `-R x,y,w,h` | `-g "x,y wxh"` | not with `gnome-screenshot` | `-crop wxh+x+y +repage` | `-a x,y,w,h` |
 | `-C` | `-c` | `-p` | not with `import` | `-p` |
 | `-l <windowid>` | not with `grim` | not with `gnome-screenshot` | `-window <windowid>` | not with `scrot` |
-| `-t png`, `jpg` | `-t png`, `-t jpeg`; without `-t`, `-t jpeg` for a `.jpg` or `.jpeg` file, since grim writes PNG whatever the extension | `png` only, else not with `gnome-screenshot` | `png:<file>`, `jpg:<file>` | by the file's extension; a `-t` that differs from it is not with `scrot` |
+| `-t png`, `jpg` | `-t png`, `-t jpeg`; without `-t`, `-t jpeg` for a `.jpg` or `.jpeg` file, since grim writes PNG whatever the extension | `png` only, else not with `gnome-screenshot` | `png:<file>`, `jpg:<file>`; without `-t`, `png:<file>` for a file without an extension, which `import` can't guess | by the file's extension; a `-t` that differs from it is not with `scrot` |
 
 Under Wayland, `grim` needs a compositor with wlr-screencopy (sway, Hyprland and other wlroots ones); elsewhere it fails with its own message, so install `gnome-screenshot` there. `import` and `scrot` aren't tried under Wayland, where they would see only XWayland windows.
 
 ### Windows
 
-`sccapture` runs `powershell.exe` (else `pwsh.exe`) with `-NoProfile -NonInteractive -STA -EncodedCommand` and a fixed script; the file name and the option values reach it as data, in `SCCAPTURE_*` environment variables, never as script. (PowerShell reads a script on stdin line by line, as if typed, so a multi-line block in it can stop at the first blank line; `-EncodedCommand` is what slicc-clipboard uses.) The process is made DPI-aware first, so a scaled display is captured at its real resolution. It copies the virtual screen (every monitor), or the screen `-m`/`-D` names, or the `-R` rectangle of that (its `x,y` from the top left of the virtual screen, or of the screen `-m`/`-D` names), with `Graphics.CopyFromScreen`, draws the cursor for `-C`, and saves with the `-t` format's `ImageFormat`, or `Clipboard.SetImage` for `-c`.
+`sccapture` runs `powershell.exe` (else `pwsh.exe`) with `-NoProfile -NonInteractive -STA -EncodedCommand` and a fixed script; the file name and the option values reach it as data, in `SCCAPTURE_*` environment variables, never as script. (PowerShell reads a script on stdin line by line, as if typed, so a multi-line block in it can stop at the first blank line; `-EncodedCommand` is what slicc-clipboard uses.) The process is made per-monitor DPI-aware first (system DPI-aware before Windows 10 1703), so a scaled display is captured at its real resolution, even when the monitors' scales differ. It copies the virtual screen (every monitor), or the screen `-m`/`-D` names, or the `-R` rectangle of that (its `x,y` from the top left of the virtual screen, or of the screen `-m`/`-D` names), with `Graphics.CopyFromScreen`, draws the cursor for `-C`, and saves with the `-t` format's `ImageFormat`, or `Clipboard.SetImage` for `-c`.
 
 ### In SLICC, the SLICC commands win
 

@@ -38,7 +38,8 @@ const builders = {
       const [x, y, w, h] = o.rect;
       args.push('-crop', `${w}x${h}+${x}+${y}`, '+repage');
     }
-    return { args: [...args, o.type ? `${o.type}:${file}` : file] };
+    const type = o.type ?? (extname(file) ? undefined : 'png');
+    return { args: [...args, type ? `${type}:${file}` : file] };
   },
   scrot(o, file) {
     if (o.id) return { unsupported: '-l' };
