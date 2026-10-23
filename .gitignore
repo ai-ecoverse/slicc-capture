@@ -2,4 +2,4 @@ node_modules/
 coverage/
 test/unit/
 *.tgz
-dist/
+release/

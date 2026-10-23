@@ -26,8 +26,7 @@
   },
   "slicc": {
     "unitSources": [
-      "host",
-      "scripts"
+      "host"
     ]
   },
   "files": [

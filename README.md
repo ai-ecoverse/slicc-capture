@@ -19,7 +19,7 @@ In SLICC, the package declares `screencapture` and `sccapture` in `slicc.command
 pnpm add -g @ai-ecoverse/slicc-capture
 ```
 
-On macOS and Linux:
+On a host, the installer puts `sccapture` in `~/.local/bin`, with Node 24 or later, which it downloads (`node-<version>-<os>-<arch>.tar.gz`, or the `.zip` on Windows, checked against nodejs.org's `SHASUMS256.txt`) when none is on `PATH`:
 
 ```sh
 curl -fsSL https://get.sliccy.ai/slicc-capture | sh
@@ -31,24 +31,30 @@ On Windows, in PowerShell:
 irm https://get.sliccy.ai/slicc-capture.ps1 | iex
 ```
 
-Or, on any machine with Node 24 or later:
+The installers are `install.sh` and `install.ps1`, attached to every [GitHub release](https://github.com/ai-ecoverse/slicc-capture/releases) with the package tarball (`slicc-capture-<version>.tgz`) and `SHA256SUMS`, which lists the tarball, `install.sh` and `install.ps1`, in the style of [mcpcat's](https://github.com/ai-ecoverse/mcpcat) `install.sh`. `@semantic-release/npm` packs the tarball into `release/` (`tarballDir`), and `@semantic-release/exec` runs `scripts/assets.mjs`, which renames it and writes `SHA256SUMS`. They check the tarball against `SHA256SUMS`, unpack it into a versioned directory (`${XDG_DATA_HOME:-~/.local/share}/slicc-capture/<version>`, or `%LOCALAPPDATA%\slicc-capture\<version>` on Windows), and write a `sccapture` launcher that runs it with that Node. Without get.sliccy.ai, the same installer comes straight from the release:
+
+```sh
+curl -fsSL https://github.com/ai-ecoverse/slicc-capture/releases/latest/download/install.sh | sh
+```
+
+| `install.sh` | `install.ps1` | |
+| --- | --- | --- |
+| `--version VERSION` | `-Version VERSION` | the release to install (default: the latest) |
+| `--dir DIR` | `-Dir DIR` | where the launcher goes (default: `~/.local/bin`; on Windows `%LOCALAPPDATA%\slicc-capture\bin`, added to the user's `PATH`) |
+| `--help` | `-Help` | print the usage and exit 0 |
+
+Options reach `install.sh` after `sh -s --`, for example `curl -fsSL https://get.sliccy.ai/slicc-capture | sh -s -- --version 1.2.0 --dir ~/bin`, and `install.ps1` through a script block: `& ([scriptblock]::Create((irm https://get.sliccy.ai/slicc-capture.ps1))) -Version 1.2.0`. An unknown option, or `--dir` or `--version` without a value, prints `install.sh: <problem>` and the usage to stderr and exits 2; there are no environment overrides for the options. A failure is `install.sh: <problem>` (`install.ps1: <problem>`) on stderr and exit 1. `SLICC_INSTALL_BASE_URL` replaces the release download directory (by default `https://github.com/ai-ecoverse/slicc-capture/releases/latest/download`, or `…/download/v<version>` with `--version`), and `SLICC_NODE_DIST_BASE` replaces `https://nodejs.org/dist`. The installed command must answer `--version` with the version it was installed as (or the older `sccapture <version>`). On Windows the launcher is `sccapture.ps1`, next to a `sccapture.cmd` for `cmd.exe`; both only start `node.exe` with the entry script and the arguments, and `sccapture` itself never runs `cmd.exe`.
+
+The get.sliccy.ai entries for `slicc-capture` and `slicc-capture.ps1` are added once the first release is out.
+
+With npm, on a machine with Node 24 or later:
 
 ```sh
 npm install -g @ai-ecoverse/slicc-capture
+sccapture shot.png
 ```
 
 or without installing, `npx -p @ai-ecoverse/slicc-capture sccapture shot.png`.
-
-### The installers
-
-Each release attaches `install.sh` and `install.ps1` next to the package tarball, `slicc-capture-<version>.tgz` (the `npm pack` of the release), and a `SHA256SUMS` that lists all three. In `.releaserc.json`, `@semantic-release/exec`'s `prepare` runs `scripts/release-assets.mjs` after `@semantic-release/npm` has set the version, which writes the four files to `dist/`, and `@semantic-release/github`'s `assets` attaches them; `test/integration/repo.test.mjs` checks both, so no release ships without them. get.sliccy.ai serves the latest release's installers. Both work like mcpcat's `install.sh`:
-
-- **Options:** `--version <version>` installs that release instead of the latest; `--dir <dir>` puts the launcher there instead of the default; `--help` prints the usage and exits 0. An unknown option prints `slicc-capture: unknown option: <arg>` to stderr and exits 1, and so do `--version` or `--dir` without a value (`slicc-capture: --dir needs a value`) and a version that isn't one (`slicc-capture: invalid version: <version>`). A leading `v` is dropped (`--version v1.2.0`). The environment variables `VERSION` and `INSTALL_DIR` do the same as the options; `SLICC_INSTALL_BASE_URL` (by default `https://github.com/ai-ecoverse/slicc-capture/releases`, under which `latest/download/` and `download/v<version>/` hold the assets) and `SLICC_NODE_DIST_BASE` (by default `https://nodejs.org/dist`) point them at a mirror, as the tests do. Through a pipe, `sh -s -- --dir ~/bin` passes options to `install.sh`, and `& ([scriptblock]::Create((irm https://get.sliccy.ai/slicc-capture.ps1))) --dir C:\tools` to `install.ps1`.
-- **Node 24 or later:** the `node` on `PATH` if it is new enough, else the one the installer downloaded before; else it downloads the newest Node LTS (24 or later) in nodejs.org's `index.json`, `node-v<lts>-<os>-<arch>.tar.gz` for `install.sh` (`darwin` or `linux`, `x64` or `arm64`) and `node-v<lts>-win-<arch>.zip` for `install.ps1`, checks it against that release's `SHASUMS256.txt`, and keeps it in `<data>/node`. On musl Linux, where nodejs.org has no build, it says to install Node with the package manager and exits 1. With a Node 24 on `PATH`, `install.sh` works on any system with a POSIX `sh`, as `sccapture` treats other Unix systems as Linux; the OS and architecture matter only for the download.
-- **Where it goes:** the tarball is checked against `SHA256SUMS`, unpacked into `<data>/<version>` (replacing that version if it is there; older versions stay), and `<data>/current` points at it (a symlink; a junction on Windows). `<data>` is `${XDG_DATA_HOME:-~/.local/share}/slicc-capture` on macOS and Linux, `%LOCALAPPDATA%\slicc-capture` on Windows. The launcher, `sccapture` (`sccapture.cmd` on Windows), goes into `~/.local/bin` (`%LOCALAPPDATA%\slicc-capture\bin` on Windows) and runs that Node, by its absolute path, on `<data>/<version>/host/sccapture.mjs`, so the launcher keeps working when the `node` on `PATH` changes. A reinstall rewrites the launcher in place.
-- **Output:** `sccapture <version> installed to <launcher>`, where `<version>` is what the launcher's `--version` prints, and, when the directory isn't on `PATH`, `<dir> is not on PATH; add it with: ` and the command that adds it (`export PATH="<dir>:$PATH"`, or `[Environment]::SetEnvironmentVariable('Path', …, 'User')` on Windows), on stdout. A Node download first prints `slicc-capture: downloading Node <version>` to stderr. Any failure (no `curl` or `wget`, a failed download, a checksum mismatch, an unsupported OS or architecture) is one line on stderr, `slicc-capture: <what>`, and exit 1; on an unsupported OS or architecture it names `npm install -g @ai-ecoverse/slicc-capture` instead. `install.ps1` exits 1 when run as a file (`powershell -File install.ps1`, as `--upgrade` does); through `irm | iex` or a scriptblock it sets `$LASTEXITCODE` to 1 instead, so the session stays open. Off Windows, `install.ps1` says to use `install.sh` when it would have to download Node.
-
-The get.sliccy.ai entries for `slicc-capture` and `slicc-capture.ps1` are added once the first release is out.
 
 ## Commands
 
@@ -149,7 +155,6 @@ Only `sccapture` is installed on a host (the package's `bin`, a small Node scrip
 - **The file and its format:** without `-t`, the file's extension picks the format (on macOS, `sccapture` adds `-t` for `.jpg`, `.jpeg`, `.pdf`, `.tiff`, `.gif` and `.bmp`), else PNG. `-c` copies PNG; a file, `-t` and `-P` are then ignored, except on macOS, where `screencapture` decides. Success prints nothing, as `screencapture` does.
 - **A file is required**, as in SLICC (`sccapture: output file required (or use -c for clipboard)`, exit 2), except on macOS with `-p`, `-u`, `-P`, `-M` or `-B`, which `screencapture` handles without one.
 - **Errors:** with no tool on `PATH`, `sccapture: no screenshot tool found (tried grim, gnome-screenshot)` (the names tried on that platform) to stderr, exit 1; with `-c` and no clipboard tool, `sccapture: no clipboard tool found (tried wl-copy, xclip)`, exit 1. A tool that fails, a cancelled selection included, has its stderr passed through, exit 1. An unknown option prints `sccapture: unknown option: <arg>` and the usage to stderr, exit 2; an option the table marks as not supported on that platform prints `sccapture: <opt>: not supported on <platform>`, exit 2. The values of `-T`, `-R`, `-D` and `-J` are checked as in SLICC, and `-l` takes a window id in decimal or `0x` hex, else `sccapture: -l: invalid window: <value>`, exit 2. `-h` and `--help` print the usage to stdout and exit 0.
-- **`--upgrade`:** the command counts as installed by the installer when it runs from `<data>/<version>/host/sccapture.mjs` with a `<data>/current` next to it, and as installed with npm otherwise. `--dir` is the directory on `PATH` whose `sccapture` (`sccapture.cmd` on Windows) names `<data>`, else the installer's default. It downloads the installer with `curl`, else `wget` (`curl.exe` on Windows), and without one prints `sccapture: no downloader found (tried curl, wget)`, exit 1; a failed download has its stderr passed through, exit 1. The installer runs with `sh` (`powershell.exe`, else `pwsh.exe`, with `-ExecutionPolicy Bypass -File` on Windows), without `VERSION` and `INSTALL_DIR` in its environment, so it installs the latest release where the command is; the new version is read from `<data>/current/package.json`.
 - **Other Unix systems** are treated as Linux.
 
 ### Linux
@@ -182,7 +187,9 @@ Every host command takes `--upgrade`. It runs the latest release's installer (`i
 
 For slicc-capture, the commands are `sccapture` on a host and `screencapture` and `sccapture` in SLICC.
 
-`--version` prints the version (`0.1.0`) to stdout and exits 0, on a host and in SLICC; the installers run the installed command with it. It takes no other arguments either.
+The launcher the installer writes sets `SCCAPTURE_INSTALL_DIR` to its own directory; that is how `sccapture` knows the installer put it there (it removes the variable before it starts anything else), and without it `sccapture` counts as installed with npm. The installer is downloaded with Node's `fetch` from `https://github.com/ai-ecoverse/slicc-capture/releases/latest/download/` and run as `sh install.sh --dir DIR`, or `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File install.ps1 -Dir DIR` (else `pwsh.exe`); its stderr is passed through, and the line it prints, `sccapture <version> installed to <launcher>`, names the new version. Without `sh` (or PowerShell) it prints `sccapture: no shell found to run install.sh (tried sh)`, and a failed download `sccapture: could not download <url>: <reason>`, and exits 1. `SLICC_INSTALL_BASE_URL`, when set, replaces that release URL for `--upgrade` and for the installers' own downloads.
+
+`--version` prints the version (`0.1.0`) to stdout and exits 0, on a host and in SLICC; the installers run the installed command with it and check it reports the version they installed. It takes no other arguments either.
 
 ## Development
 
@@ -195,7 +202,7 @@ npm run test:unit
 
 - `npm install` also installs the git hooks into this worktree's own `node_modules/` through slicc-shared-web's `slicc-install-hooks` and the committed `.githooks/`.
 - `npm run lint`: Biome, the no-comment check and the other [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web) checks, then `shellcheck -s sh` and `dash -n` on `install.sh`.
-- `npm test`: the integration tests in `test/integration/`. `test/integration/repo.test.mjs` checks the workflow, the release config, the pinned devDependencies and what `npm pack` ships. The host tests run `host/` against fake `screencapture`, `grim`, `slurp`, `gnome-screenshot`, `import`, `scrot`, `wl-copy`, `xclip`, `xdg-open`, `powershell.exe`, `pwsh.exe`, `curl`, `wget` and a fake installer on a temporary `PATH`, with the platform forced, so each branch is checked on any machine; only CI touches a real screen. `test/integration/install.test.mjs` runs `install.sh` against a fake release and a fake nodejs.org on `file://` URLs, with fake `node`, `curl`, `wget`, `uname` and `ldd` on a `PATH` of only the tools it needs: a fresh install, `--version`, `--dir`, `--help`, the option errors, a checksum mismatch, Node missing or too old, musl, an unsupported OS, and a reinstall over an older version. It runs `install.ps1` the same way under `pwsh`, from a local HTTP server, when `pwsh` is on `PATH`, and skips that, saying why, otherwise.
+- `npm test`: the integration tests in `test/integration/`. `test/integration/repo.test.mjs` checks the workflow, the release config, the pinned devDependencies and what `npm pack` ships. The host tests run `host/` against fake `screencapture`, `grim`, `slurp`, `gnome-screenshot`, `import`, `scrot`, `wl-copy`, `xclip`, `xdg-open`, `powershell.exe` and `pwsh.exe` on a temporary `PATH`, and `--upgrade` against installers served from a local HTTP server, with the platform forced, so each branch is checked on any machine; only CI touches a real screen. `install.test.mjs` runs `install.sh` on a tarball packed from the tree, with the Node on `PATH` and with a Node download from a fake `nodejs.org`, and `--upgrade` against a release served from a local directory; `install.ps1` is checked statically, and run when `pwsh` is on `PATH`.
 - `npm run test:unit`: the unit tests in the gitignored `test/unit/`, with coverage in `coverage/unit/lcov.info`. The pre-commit hook wants 100% coverage of the changed lines, and runs `diff-cover` through `uvx`, so install [uv](https://docs.astral.sh/uv/) once.
 
 CI is `.github/workflows/ci.yml`, the only workflow, which runs [slicc-shared-web's pipeline](https://github.com/ai-ecoverse/slicc-shared-web#pipeline) at the devDependency's version: `npm run lint`, then `npm test`, then on a pull request the Claude and Codex reviews. The merge queue requires `ci / integration` and `ci / review`. On a push to `main`, semantic-release releases and publishes to npm through trusted publishing, with provenance from `ci.yml`, and attaches the installers.

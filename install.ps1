@@ -1,213 +1,214 @@
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
+param(
+  [string]$Version = '',
+  [string]$Dir = '',
+  [switch]$Help
+)
 
-function Install-SliccCapture([object[]]$Arguments) {
-  $name = 'slicc-capture'
-  $bin = 'sccapture'
-  $repo = 'ai-ecoverse/slicc-capture'
-  $minNode = 24
-  $npm = 'npm install -g @ai-ecoverse/slicc-capture'
-
-  $version = "$env:VERSION"
-  $dir = "$env:INSTALL_DIR"
-  $releases = "$env:SLICC_INSTALL_BASE_URL"
-  if (-not $releases) { $releases = "https://github.com/$repo/releases" }
-  $nodeDist = "$env:SLICC_NODE_DIST_BASE"
-  if (-not $nodeDist) { $nodeDist = 'https://nodejs.org/dist' }
-
-  $rest = @()
-  if ($Arguments) { $rest = @($Arguments) }
-  for ($i = 0; $i -lt $rest.Count; $i++) {
-    $arg = "$($rest[$i])"
-    switch -CaseSensitive ($arg) {
-      '--help' {
-        [Console]::Out.WriteLine("usage: install.ps1 [--version <version>] [--dir <dir>] [--help]`n")
-        [Console]::Out.WriteLine("Installs $bin, from the latest release of $repo or <version>, with Node $minNode or later (downloaded if missing).`n")
-        [Console]::Out.WriteLine('  --version <version>  the release to install (default: the latest; or VERSION)')
-        [Console]::Out.WriteLine('  --dir <dir>          where the launcher goes (default: %LOCALAPPDATA%\slicc-capture\bin; or INSTALL_DIR)')
-        [Console]::Out.WriteLine('  --help               print this and exit')
-        return
-      }
-      { $_ -eq '--version' -or $_ -eq '--dir' } {
-        if ($i + 1 -ge $rest.Count -or "$($rest[$i + 1])" -eq '') { throw "$arg needs a value" }
-        $i++
-        if ($arg -eq '--version') { $version = "$($rest[$i])" } else { $dir = "$($rest[$i])" }
-      }
-      default { throw "unknown option: $arg" }
-    }
-  }
-
-  if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set' }
-  $data = Join-Path $env:LOCALAPPDATA $name
-  if (-not $dir) { $dir = Join-Path $data 'bin' }
-  if ($version.StartsWith('v')) { $version = $version.Substring(1) }
-  if ($version -and $version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$') {
-    throw "invalid version: $version"
-  }
-
-  $onWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
-  if ($PSVersionTable.PSEdition -eq 'Desktop') {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  }
-
-  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("$name-" + [Guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-  $stage = $null
-  try {
-    function Get-Download([string]$url, [string]$out) {
-      try {
-        Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-      } catch {
-        throw "download failed: $url"
-      }
-    }
-
-    function Assert-Checksum([string]$file, [string]$label, [string]$expected) {
-      if (-not $expected) { throw "no checksum for $label" }
-      $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
-      if ($actual -cne $expected.ToLowerInvariant()) { throw "checksum mismatch for $label" }
-    }
-
-    function Find-Sum([string]$sums, [string]$file) {
-      foreach ($line in [IO.File]::ReadAllLines($sums)) {
-        if ($line -match '^([0-9a-fA-F]{64}) [ *](.+)$' -and $Matches[2] -ceq $file) { return $Matches[1] }
-      }
-      return $null
-    }
-
-    function Test-Node([string]$node) {
-      if (-not $node -or -not (Test-Path -LiteralPath $node)) { return $false }
-      try { $out = "$(& $node --version 2>$null)" } catch { return $false }
-      if ($out -match '^v?([0-9]+)\.') { return [int]$Matches[1] -ge $minNode }
-      return $false
-    }
-
-    $managed = Join-Path (Join-Path $data 'node') 'node.exe'
-    $node = $null
-    $found = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found -and (Test-Node $found.Source)) {
-      $node = $found.Source
-    } elseif (Test-Node $managed) {
-      $node = $managed
-    } else {
-      if (-not $onWindows) { throw "unsupported OS: install.ps1 is for Windows; use install.sh or $npm" }
-      $cpu = "$env:PROCESSOR_ARCHITEW6432"
-      if (-not $cpu) { $cpu = "$env:PROCESSOR_ARCHITECTURE" }
-      switch ($cpu) {
-        'AMD64' { $arch = 'x64' }
-        'ARM64' { $arch = 'arm64' }
-        default { throw "unsupported architecture: $cpu; install Node $minNode or later, or use $npm" }
-      }
-      Get-Download "$nodeDist/index.json" (Join-Path $tmp 'index.json')
-      $lts = $null
-      foreach ($entry in (Get-Content -Raw -LiteralPath (Join-Path $tmp 'index.json') | ConvertFrom-Json)) {
-        if ($entry.lts -and "$($entry.version)" -match '^v([0-9]+)\.[0-9]+\.[0-9]+$' -and [int]$Matches[1] -ge $minNode) {
-          $lts = "$($entry.version)".Substring(1)
-          break
-        }
-      }
-      if (-not $lts) { throw "no Node LTS release $minNode or later in $nodeDist/index.json" }
-      $base = "node-v$lts-win-$arch"
-      $zip = Join-Path $tmp "$base.zip"
-      Get-Download "$nodeDist/v$lts/SHASUMS256.txt" (Join-Path $tmp 'SHASUMS256.txt')
-      [Console]::Error.WriteLine("${name}: downloading Node $lts")
-      Get-Download "$nodeDist/v$lts/$base.zip" $zip
-      Assert-Checksum $zip "$base.zip" (Find-Sum (Join-Path $tmp 'SHASUMS256.txt') "$base.zip")
-      New-Item -ItemType Directory -Path $data -Force | Out-Null
-      $stage = Join-Path $data ".node-$PID"
-      if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-      Expand-Archive -LiteralPath $zip -DestinationPath $stage
-      $unpacked = Join-Path $stage $base
-      if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'node.exe'))) { throw "no node.exe in $base.zip" }
-      $target = Join-Path $data 'node'
-      if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
-      Move-Item -LiteralPath $unpacked -Destination $target
-      Remove-Item -LiteralPath $stage -Recurse -Force
-      $stage = $null
-      $node = $managed
-    }
-    if (-not (Test-Node $node)) { throw "$node is not Node $minNode or later" }
-
-    if ($version) { $base = "$releases/download/v$version" } else { $base = "$releases/latest/download" }
-    $sums = Join-Path $tmp 'SHA256SUMS'
-    Get-Download "$base/SHA256SUMS" $sums
-    if (-not $version) {
-      foreach ($line in [IO.File]::ReadAllLines($sums)) {
-        if ($line -cmatch "^[0-9a-f]{64} [ *]$name-([0-9][0-9A-Za-z.+-]*)\.tgz$") {
-          $version = $Matches[1]
-          break
-        }
-      }
-      if (-not $version) { throw "no $name tarball in $base/SHA256SUMS" }
-    }
-    $tarball = "$name-$version.tgz"
-    $sum = Find-Sum $sums $tarball
-    if (-not $sum) { throw "no checksum for $tarball in $base/SHA256SUMS" }
-    $file = Join-Path $tmp $tarball
-    Get-Download "$base/$tarball" $file
-    Assert-Checksum $file $tarball $sum
-
-    $tar = Get-Command tar -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $tar) { throw 'tar is required (Windows 10 1803 or later has it)' }
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    $stage = Join-Path $data ".install-$PID"
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    & $tar.Source -xzf $file -C $stage --strip-components=1
-    if ($LASTEXITCODE -ne 0) { throw "could not unpack $tarball" }
-    if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $stage 'host') "$bin.mjs"))) { throw "no host/$bin.mjs in $tarball" }
-    $current = Join-Path $data 'current'
-    $link = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-    if ($link) { $link.Delete() }
-    $versionDir = Join-Path $data $version
-    if (Test-Path -LiteralPath $versionDir) { Remove-Item -LiteralPath $versionDir -Recurse -Force }
-    Move-Item -LiteralPath $stage -Destination $versionDir
-    $stage = $null
-
-    if ($onWindows) {
-      New-Item -ItemType Junction -Path $current -Target $versionDir | Out-Null
-    } else {
-      New-Item -ItemType SymbolicLink -Path $current -Target $versionDir | Out-Null
-    }
-
-    $entry = Join-Path (Join-Path $versionDir 'host') "$bin.mjs"
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    $dir = (Resolve-Path -LiteralPath $dir).ProviderPath
-    $launcher = Join-Path $dir "$bin.cmd"
-    $line = '@"' + $node.Replace('%', '%%') + '" "' + $entry.Replace('%', '%%') + '" %*'
-    try {
-      $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-    } catch {
-      $encoding = New-Object Text.UTF8Encoding $false
-    }
-    [IO.File]::WriteAllText("$launcher.$PID", "$line`r`n", $encoding)
-    Move-Item -LiteralPath "$launcher.$PID" -Destination $launcher -Force
-
-    $installed = "$(& $node $entry --version 2>$null)".Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $installed) { throw "$launcher --version failed" }
-    [Console]::Out.WriteLine("$bin $installed installed to $launcher")
-
-    $sep = [IO.Path]::PathSeparator
-    $paths = @("$env:PATH".Split($sep)) + @("$([Environment]::GetEnvironmentVariable('Path', 'User'))".Split($sep))
-    $on = $false
-    foreach ($p in $paths) {
-      if ($p -and $p.TrimEnd('\', '/') -eq $dir.TrimEnd('\', '/')) { $on = $true }
-    }
-    if (-not $on) {
-      [Console]::Out.WriteLine("$dir is not on PATH; add it with: [Environment]::SetEnvironmentVariable('Path', '$($dir.Replace("'", "''"));' + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')")
-    }
-  } finally {
-    if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  }
-}
-
-$code = 0
 try {
-  Install-SliccCapture -Arguments $args
+  & {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+
+    $BinName = 'sccapture'
+    $Package = 'slicc-capture'
+    $Repo = 'ai-ecoverse/slicc-capture'
+    $MinNode = 24
+    $OnWindows = [System.Environment]::OSVersion.Platform -eq 'Win32NT'
+    $LocalData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.Environment]::GetFolderPath('LocalApplicationData') }
+    $DataDir = Join-Path $LocalData $Package
+    $NodeDist = if ($env:SLICC_NODE_DIST_BASE) { $env:SLICC_NODE_DIST_BASE.TrimEnd('/') } else { 'https://nodejs.org/dist' }
+
+    function Show-Usage {
+      Write-Output 'usage: install.ps1 [-Version VERSION] [-Dir DIR] [-Help]'
+      Write-Output ''
+      Write-Output "Installs $BinName from @ai-ecoverse/$Package, with Node $MinNode or later (downloaded if missing)."
+      Write-Output ''
+      Write-Output '  -Version VERSION   the release to install (default: the latest)'
+      Write-Output "  -Dir DIR           where the launcher goes (default: $DataDir\bin, added to the user's PATH)"
+      Write-Output '  -Help              print this usage and exit'
+    }
+
+    function Stop-Install([string]$Message) {
+      throw "install.ps1: $Message"
+    }
+
+    function Get-File([string]$Url, [string]$Path) {
+      try {
+        Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Path
+      } catch {
+        Stop-Install "could not download ${Url}: $($_.Exception.Message)"
+      }
+    }
+
+    function Get-Sum([string]$Sums, [string]$Name) {
+      foreach ($line in Get-Content -LiteralPath $Sums) {
+        if ($line -match '^([0-9a-f]{64})  \*?(.+)$' -and $Matches[2] -eq $Name) { return $Matches[1] }
+      }
+      return ''
+    }
+
+    function Test-Sum([string]$Path, [string]$Expected) {
+      $name = Split-Path -Leaf $Path
+      if (-not $Expected) { Stop-Install "no checksum for $name" }
+      $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+      if ($actual -ne $Expected) { Stop-Install "checksum mismatch for ${name}: expected $Expected, got $actual" }
+    }
+
+    function Test-Node([string]$Path) {
+      try {
+        $reported = & $Path --version 2>$null
+      } catch {
+        return $false
+      }
+      if ($LASTEXITCODE -ne 0 -or -not ("$reported" -match '^v(\d+)\.')) { return $false }
+      return [int]$Matches[1] -ge $MinNode
+    }
+
+    function Get-Node {
+      $onPath = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($onPath -and (Test-Node $onPath.Source)) { return $onPath.Source }
+      $managed = Join-Path (Join-Path $DataDir 'node') 'node.exe'
+      if ((Test-Path -LiteralPath $managed) -and (Test-Node $managed)) { return $managed }
+      if (-not $OnWindows) { Stop-Install "no Node $MinNode or later on PATH; install it and re-run" }
+      $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+        'AMD64' { 'x64' }
+        'ARM64' { 'arm64' }
+        default { Stop-Install "no Node download for $($env:PROCESSOR_ARCHITECTURE); install Node $MinNode or later and re-run" }
+      }
+      [Console]::Error.WriteLine("install.ps1: no Node $MinNode or later on PATH, downloading it")
+      $index = Invoke-RestMethod -UseBasicParsing -Uri "$NodeDist/index.json"
+      $candidates = @($index | Where-Object { [int]($_.version -replace '^v(\d+)\..*$', '$1') -ge $MinNode })
+      $pick = $candidates | Where-Object { $_.lts } | Select-Object -First 1
+      if (-not $pick) { $pick = $candidates | Select-Object -First 1 }
+      if (-not $pick) { Stop-Install "no Node $MinNode or later in $NodeDist/index.json" }
+      $nodeVersion = $pick.version
+      $archive = "node-$nodeVersion-win-$arch.zip"
+      $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("sccapture-node-" + [System.Guid]::NewGuid())
+      New-Item -ItemType Directory -Path $tmp | Out-Null
+      try {
+        Get-File "$NodeDist/$nodeVersion/SHASUMS256.txt" (Join-Path $tmp 'SHASUMS256.txt')
+        Get-File "$NodeDist/$nodeVersion/$archive" (Join-Path $tmp $archive)
+        Test-Sum (Join-Path $tmp $archive) (Get-Sum (Join-Path $tmp 'SHASUMS256.txt') $archive)
+        Expand-Archive -LiteralPath (Join-Path $tmp $archive) -DestinationPath $tmp
+        New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+        $nodeDir = Join-Path $DataDir 'node'
+        if (Test-Path -LiteralPath $nodeDir) { Remove-Item -Recurse -Force -LiteralPath $nodeDir }
+        Move-Item -LiteralPath (Join-Path $tmp "node-$nodeVersion-win-$arch") -Destination $nodeDir
+      } finally {
+        Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+      }
+      [Console]::Error.WriteLine("install.ps1: Node $nodeVersion installed to $nodeDir")
+      return $managed
+    }
+
+    function Get-Quoted([string]$Text) {
+      return "'" + $Text.Replace("'", "''") + "'"
+    }
+
+    if ($Help) {
+      Show-Usage
+      return
+    }
+
+    $Version = $Version -replace '^v', ''
+    if (-not $Dir) { $Dir = Join-Path $DataDir 'bin' }
+
+    $Node = Get-Node
+
+    $Base = if ($env:SLICC_INSTALL_BASE_URL) {
+      $env:SLICC_INSTALL_BASE_URL.TrimEnd('/')
+    } elseif ($Version) {
+      "https://github.com/$Repo/releases/download/v$Version"
+    } else {
+      "https://github.com/$Repo/releases/latest/download"
+    }
+
+    $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("sccapture-install-" + [System.Guid]::NewGuid())
+    New-Item -ItemType Directory -Path $Tmp | Out-Null
+    try {
+      $Sums = Join-Path $Tmp 'SHA256SUMS'
+      Get-File "$Base/SHA256SUMS" $Sums
+      if ($Version) {
+        $Tgz = "$Package-$Version.tgz"
+      } else {
+        $Tgz = ''
+        foreach ($line in Get-Content -LiteralPath $Sums) {
+          if ($line -match "^[0-9a-f]{64}  \*?($Package-[0-9][0-9A-Za-z.+-]*\.tgz)$") {
+            $Tgz = $Matches[1]
+            break
+          }
+        }
+        if (-not $Tgz) { Stop-Install "no $Package tarball in $Base/SHA256SUMS" }
+      }
+      $Tarball = Join-Path $Tmp $Tgz
+      Get-File "$Base/$Tgz" $Tarball
+      Test-Sum $Tarball (Get-Sum $Sums $Tgz)
+
+      $BundleVersion = $Tgz.Substring($Package.Length + 1, $Tgz.Length - $Package.Length - 5)
+      $BundleDir = Join-Path $DataDir $BundleVersion
+      $Extract = Join-Path $DataDir (".bundle-" + [System.Guid]::NewGuid())
+      New-Item -ItemType Directory -Force -Path $Extract | Out-Null
+      $tar = if ($OnWindows) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { 'tar' }
+      & $tar -xzf $Tarball -C $Extract --strip-components=1
+      if ($LASTEXITCODE -ne 0) { Stop-Install "could not unpack $Tgz" }
+      $Entry = Join-Path (Join-Path $BundleDir 'host') "$BinName.mjs"
+      if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Extract 'host') "$BinName.mjs"))) {
+        Stop-Install "$Tgz has no host/$BinName.mjs"
+      }
+      if (Test-Path -LiteralPath $BundleDir) { Remove-Item -Recurse -Force -LiteralPath $BundleDir }
+      Move-Item -LiteralPath $Extract -Destination $BundleDir
+    } finally {
+      Remove-Item -Recurse -Force -LiteralPath $Tmp -ErrorAction SilentlyContinue
+    }
+
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $Dir = (Resolve-Path -LiteralPath $Dir).ProviderPath
+    $Launcher = Join-Path $Dir "$BinName.ps1"
+    $Cmd = Join-Path $Dir "$BinName.cmd"
+
+    $ps1 = @(
+      "`$env:SCCAPTURE_INSTALL_DIR = $(Get-Quoted $Dir)",
+      "& $(Get-Quoted $Node) $(Get-Quoted $Entry) @args",
+      'exit $LASTEXITCODE',
+      ''
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($Launcher, $ps1, (New-Object System.Text.UTF8Encoding $true))
+
+    $escape = { param($Text) $Text.Replace('%', '%%') }
+    $cmdLines = @(
+      '@echo off',
+      'setlocal',
+      'for /f "tokens=2 delims=:." %%c in (''chcp'') do set "SCCAPTURE_CP=%%c"',
+      'chcp 65001 >nul',
+      "set `"SCCAPTURE_INSTALL_DIR=$(& $escape $Dir)`"",
+      '(',
+      "`"$(& $escape $Node)`" `"$(& $escape $Entry)`" %*",
+      'call :done %%ERRORLEVEL%%',
+      'exit /b',
+      ')',
+      ':done',
+      'chcp %SCCAPTURE_CP% >nul',
+      'exit /b %1',
+      ''
+    ) -join "`r`n"
+    [System.IO.File]::WriteAllText($Cmd, $cmdLines, (New-Object System.Text.UTF8Encoding $false))
+
+    $Reported = & $Node $Entry --version
+    if ($LASTEXITCODE -ne 0 -or ("$Reported" -ne "$BundleVersion" -and "$Reported" -ne "$BinName $BundleVersion")) {
+      Stop-Install "$Entry reports $Reported, not $BundleVersion"
+    }
+    Write-Output "$BinName $BundleVersion installed to $Launcher"
+
+    if ($OnWindows) {
+      $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+      $parts = @(if ($userPath) { $userPath.Split(';') | Where-Object { $_ } })
+      if ($parts -notcontains $Dir) {
+        [System.Environment]::SetEnvironmentVariable('Path', (@($parts) + $Dir) -join ';', 'User')
+        Write-Output "Added $Dir to your user PATH; open a new terminal to use $BinName"
+      }
+    }
+  }
 } catch {
-  [Console]::Error.WriteLine("slicc-capture: $($_.Exception.Message)")
-  $code = 1
+  [Console]::Error.WriteLine($_.Exception.Message)
+  if ($MyInvocation.MyCommand.Path) { exit 1 }
 }
-if ($MyInvocation.MyCommand.Path) { exit $code }
-if ($code -ne 0) { $global:LASTEXITCODE = $code }
