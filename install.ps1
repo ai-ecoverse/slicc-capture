@@ -7,6 +7,7 @@ param(
 try {
   & {
     $ErrorActionPreference = 'Stop'
+    $PSNativeCommandUseErrorActionPreference = $false
     $ProgressPreference = 'SilentlyContinue'
 
     $BinName = 'sccapture'
@@ -56,7 +57,7 @@ try {
 
     function Test-Node([string]$Path) {
       try {
-        $reported = & $Path --version 2>$null
+        $reported = & { $ErrorActionPreference = 'Continue'; & $Path --version 2>$null }
       } catch {
         return $false
       }
@@ -89,7 +90,11 @@ try {
         Get-File "$NodeDist/$nodeVersion/SHASUMS256.txt" (Join-Path $tmp 'SHASUMS256.txt')
         Get-File "$NodeDist/$nodeVersion/$archive" (Join-Path $tmp $archive)
         Test-Sum (Join-Path $tmp $archive) (Get-Sum (Join-Path $tmp 'SHASUMS256.txt') $archive)
-        Expand-Archive -LiteralPath (Join-Path $tmp $archive) -DestinationPath $tmp
+        try {
+          Expand-Archive -LiteralPath (Join-Path $tmp $archive) -DestinationPath $tmp
+        } catch {
+          Stop-Install "could not unpack $archive"
+        }
         New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
         $nodeDir = Join-Path $DataDir 'node'
         if (Test-Path -LiteralPath $nodeDir) { Remove-Item -Recurse -Force -LiteralPath $nodeDir }
@@ -150,7 +155,7 @@ try {
       $Extract = Join-Path $DataDir (".bundle-" + [System.Guid]::NewGuid())
       New-Item -ItemType Directory -Force -Path $Extract | Out-Null
       $tar = if ($OnWindows) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { 'tar' }
-      & $tar -xzf $Tarball -C $Extract --strip-components=1
+      & { $ErrorActionPreference = 'Continue'; & $tar -xzf $Tarball -C $Extract --strip-components=1 }
       if ($LASTEXITCODE -ne 0) { Stop-Install "could not unpack $Tgz" }
       $Entry = Join-Path (Join-Path $BundleDir 'host') "$BinName.mjs"
       if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Extract 'host') "$BinName.mjs"))) {
@@ -166,7 +171,7 @@ try {
         if (-not $npmCli) { Stop-Install "$Tgz has dependencies, and there is no npm next to $Node" }
         Push-Location -LiteralPath $Extract
         try {
-          & $Node $npmCli install --omit=dev --ignore-scripts --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine($_) }
+          & { $ErrorActionPreference = 'Continue'; & $Node $npmCli install --omit=dev --ignore-scripts --no-audit --no-fund | ForEach-Object { [Console]::Error.WriteLine($_) } }
           $npmStatus = $LASTEXITCODE
         } finally {
           Pop-Location
@@ -201,6 +206,8 @@ try {
       '    if ($PSVersionTable.PSEdition -ne ''Core'' -and $sccaptureText -match ''\s'') { $sccaptureText -replace ''(\\+)$'', ''$1$1'' } else { $sccaptureText }',
       '  }',
       '} })',
+      '$PSNativeCommandUseErrorActionPreference = $false',
+      '$ErrorActionPreference = ''Continue''',
       '$sccaptureStatus = 1',
       'try {',
       "  & $(Get-Quoted $Node) $(Get-Quoted $Entry) @sccaptureArgs",
