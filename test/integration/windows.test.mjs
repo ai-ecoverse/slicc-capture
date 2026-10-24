@@ -520,6 +520,84 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
     }
   });
 
+  for (const shell of ['powershell.exe', 'pwsh']) {
+    it(`exits non-zero from both launchers under ${shell} when their node.exe can't start`, async (t) => {
+      const exe =
+        shell === 'pwsh'
+          ? pwsh &&
+            spawnSync(pwsh, ['-NoProfile', '-Command', '(Get-Process -Id $PID).Path'], {
+              encoding: 'utf8',
+            }).stdout.trim()
+          : powershell;
+      if (!exe) {
+        t.skip('pwsh is not installed');
+        return;
+      }
+      const nodeDir = mkdtempSync(join(scratch, 'node-'));
+      const node = join(nodeDir, 'node.exe');
+      copyFileSync(process.execPath, node);
+      const local = mkdtempSync(join(scratch, 'local-'));
+      const bin = join(local, 'bin');
+      const bare = `${nodeDir};${system};${dirname(system)};${dirname(powershell)}`;
+      const result = await run(
+        exe,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          installPs1,
+          '-Dir',
+          bin,
+        ],
+        {
+          env: withPath(
+            clean({
+              LOCALAPPDATA: local,
+              SLICC_INSTALL_BASE_URL: release(`gone-${shell}`, version),
+            }),
+            bare
+          ),
+        }
+      );
+      assert.equal(result.status, 0, result.stderr);
+      const ps1 = join(bin, 'sccapture.ps1');
+      const launcher = join(bin, 'sccapture.cmd');
+      assert.ok(readFileSync(ps1, 'utf8').includes(`'${node}'`));
+      assert.ok(readFileSync(launcher, 'utf8').includes(`"${node}"`));
+      const env = clean({ T_LAUNCHER: ps1 });
+      const callers = [
+        '',
+        "$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'; ",
+        'trap { continue }; ',
+      ];
+      const show = (name) =>
+        `'${name}=' + $(if ($null -eq $env:${name}) { 'unset' } else { $env:${name} })`;
+      for (const broken of ['not a program', null]) {
+        if (broken === null) rmSync(node);
+        else writeFileSync(node, broken);
+        const how = broken === null ? 'deleted' : 'corrupt';
+        const viaCmd = await batch(`"${launcher}" --version`, env);
+        assert.notEqual(viaCmd.status, 0, `cmd ${how}`);
+        for (const caller of callers) {
+          for (const redirect of ['', ' 2>$null']) {
+            const viaPs = await ps(
+              exe,
+              `${caller}cmd /c exit 0; & $env:T_LAUNCHER --version${redirect}; 'code=' + $LASTEXITCODE; ${show('SCCAPTURE_INSTALL_DIR')}; ${show('NODE_USE_ENV_PROXY')}`,
+              env
+            );
+            assert.deepEqual(
+              lines(viaPs.stdout),
+              ['code=1', 'SCCAPTURE_INSTALL_DIR=unset', 'NODE_USE_ENV_PROXY=unset'],
+              `${how} ${caller}${redirect}: ${viaPs.stderr}`
+            );
+          }
+        }
+      }
+    });
+  }
+
   it('upgrades in place from the installed sccapture.cmd and sccapture.ps1', async () => {
     const local = mkdtempSync(join(scratch, 'local-'));
     const bin = join(local, 'bin');
