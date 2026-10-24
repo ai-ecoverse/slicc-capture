@@ -1000,6 +1000,28 @@ describe('--upgrade', () => {
     }
   });
 
+  it('still exits 1 when cancelling a failed download rejects', async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      body: { cancel: () => Promise.reject(new Error('x')) },
+    });
+    try {
+      const result = await capture({
+        platform: 'linux',
+        argv: ['--upgrade'],
+        extra: { SCCAPTURE_INSTALL_DIR: '/d', SLICC_INSTALL_BASE_URL: 'http://127.0.0.1:1/r' },
+      });
+      assert.deepEqual(
+        [result.code, result.stderr],
+        [1, 'sccapture: could not download http://127.0.0.1:1/r/install.sh: HTTP 500\n']
+      );
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('gives up on a download that never answers, after the timeout', async () => {
     const sockets = new Set();
     const silent = createServer(() => {});
