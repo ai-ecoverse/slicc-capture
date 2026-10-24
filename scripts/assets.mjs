@@ -12,13 +12,13 @@ if (!dir || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version ?? '')) {
 const out = resolve(dir);
 const packed = join(out, `ai-ecoverse-slicc-capture-${version}.tgz`);
 const tarball = `slicc-capture-${version}.tgz`;
-if (existsSync(packed)) renameSync(packed, join(out, tarball));
-if (!existsSync(join(out, tarball))) {
+const source = existsSync(packed) ? packed : join(out, tarball);
+if (!existsSync(source)) {
   console.error(`scripts/assets.mjs: no ${packed}`);
   process.exit(1);
 }
 const entries = new Map();
-const tar = gunzipSync(readFileSync(join(out, tarball)));
+const tar = gunzipSync(readFileSync(source));
 for (let at = 0; at + 512 <= tar.length; ) {
   const field = (from, length) =>
     tar
@@ -43,6 +43,7 @@ if (!manifest || Object.keys(bins).length === 0 || lacking.length > 0) {
   console.error(`scripts/assets.mjs: ${tarball} lacks ${what || 'a package.json with bin'}`);
   process.exit(1);
 }
+if (source === packed) renameSync(packed, join(out, tarball));
 for (const name of ['install.sh', 'install.ps1']) copyFileSync(join(root, name), join(out, name));
 const sums = [tarball, 'install.sh', 'install.ps1']
   .map(

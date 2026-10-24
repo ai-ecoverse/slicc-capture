@@ -143,6 +143,8 @@ ensure_node() {
   fi
   printf 'install.sh: no Node %s or later on PATH, downloading it\n' "$MIN_NODE" >&2
   _tmp="$(mktemp -d)"
+  _extract=""
+  trap 'rm -rf "$_tmp" ${_extract:+"$_extract"}' EXIT
   fetch "$NODE_DIST_BASE/index.json" "$_tmp/index.json"
   _index="$(cat "$_tmp/index.json")"
   _version="$(pick_node "$_index" 1)"
@@ -156,7 +158,7 @@ ensure_node() {
   _extract="$DATA_DIR/.node-$$"
   rm -rf "$_extract"
   mkdir -p "$_extract"
-  tar xzf "$_tmp/$_archive" -C "$_extract" --strip-components=1
+  tar xzf "$_tmp/$_archive" -C "$_extract" --strip-components=1 || die "could not unpack $_archive"
   rm -rf "$_tmp" "$DATA_DIR/node"
   mv "$_extract" "$DATA_DIR/node"
   printf 'install.sh: Node %s installed to %s\n' "$_version" "$DATA_DIR/node" >&2
@@ -200,7 +202,7 @@ mkdir -p "$DATA_DIR"
 EXTRACT="$DATA_DIR/.bundle-$$"
 rm -rf "$EXTRACT"
 mkdir -p "$EXTRACT"
-tar xzf "$TMP_INSTALL/$TGZ" -C "$EXTRACT" --strip-components=1
+tar xzf "$TMP_INSTALL/$TGZ" -C "$EXTRACT" --strip-components=1 || die "could not unpack $TGZ"
 ENTRY="$BUNDLE_DIR/host/$BIN_NAME.mjs"
 [ -f "$EXTRACT/host/$BIN_NAME.mjs" ] || die "$TGZ has no host/$BIN_NAME.mjs"
 if "$NODE_ABS" -e 'const f = process.argv[1]; const p = JSON.parse(require("fs").readFileSync(f, "utf8")); if (Object.keys({ ...p.dependencies, ...p.optionalDependencies }).length === 0) process.exit(1); delete p.devDependencies; require("fs").writeFileSync(f, JSON.stringify(p, null, 2))' "$EXTRACT/package.json"; then

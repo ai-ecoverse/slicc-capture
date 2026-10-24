@@ -53,7 +53,7 @@ function release(at, as = version, patch = () => {}, status = 0) {
     encoding: 'utf8',
   });
   assert.equal(assets.status, status, assets.stderr);
-  if (status !== 0) return assets;
+  if (status !== 0) return { ...assets, dir };
   if (at) cpSync(dir, at, { recursive: true });
   return dir;
 }
@@ -148,6 +148,7 @@ describe('scripts/assets.mjs', () => {
       noEntry.stderr,
       'scripts/assets.mjs: slicc-capture-0.6.0.tgz lacks host/sccapture.mjs (bin sccapture)\n'
     );
+    assert.deepEqual(readdirSync(noEntry.dir), ['ai-ecoverse-slicc-capture-0.6.0.tgz']);
     const noBin = release(
       undefined,
       '0.6.1',
@@ -163,6 +164,10 @@ describe('scripts/assets.mjs', () => {
       noBin.stderr,
       'scripts/assets.mjs: slicc-capture-0.6.1.tgz lacks a package.json with bin\n'
     );
+    assert.deepEqual(readdirSync(noBin.dir), ['ai-ecoverse-slicc-capture-0.6.1.tgz']);
+    const rerun = spawnSync(process.execPath, [join(root, 'scripts/assets.mjs'), dir, version]);
+    assert.equal(rerun.status, 0, String(rerun.stderr));
+    assert.equal(readFileSync(join(dir, 'SHA256SUMS'), 'utf8'), lines.join('\n'));
     const bad = spawnSync(process.execPath, [join(root, 'scripts/assets.mjs'), dir, 'nope']);
     assert.equal(bad.status, 2);
     const none = spawnSync(process.execPath, [join(root, 'scripts/assets.mjs'), scratch, '1.0.0']);
@@ -314,6 +319,30 @@ describe('install.sh', { skip: !curl && 'curl is not installed' }, () => {
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /^install\.sh: checksum mismatch for slicc-capture-/);
+    assert.ok(!existsSync(join(h, 'bin', 'sccapture')));
+  });
+
+  it('fails with exit 1 and leaves nothing behind when the tarball does not unpack', async () => {
+    const bad = mkdtempSync(join(scratch, 'corrupt-'));
+    cpSync(dir, bad, { recursive: true });
+    const tgz = join(bad, `slicc-capture-${version}.tgz`);
+    const whole = readFileSync(tgz);
+    writeFileSync(tgz, whole.subarray(0, whole.length >> 1));
+    writeFileSync(join(bad, 'SHA256SUMS'), `${sha256(tgz)}  slicc-capture-${version}.tgz\n`);
+    const h = home();
+    const temp = mkdtempSync(join(scratch, 'tmp-'));
+    const result = await run('sh', [installSh, '--dir', join(h, 'bin')], {
+      env: env({ HOME: h, TMPDIR: temp, SLICC_INSTALL_BASE_URL: pathToFileURL(bad).href }),
+    });
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `install\\.sh: could not unpack slicc-capture-${version.replaceAll('.', '\\.')}\\.tgz\n$`
+      )
+    );
+    assert.deepEqual(readdirSync(join(h, '.local/share/slicc-capture')), []);
+    assert.deepEqual(readdirSync(temp), []);
     assert.ok(!existsSync(join(h, 'bin', 'sccapture')));
   });
 
@@ -481,6 +510,32 @@ describe('install.sh', { skip: !curl && 'curl is not installed' }, () => {
     });
     assert.equal(none.status, 1);
     assert.match(none.stderr, /no Node 24 or later in /);
+    const whole = readFileSync(archive);
+    writeFileSync(archive, whole.subarray(0, whole.length >> 1));
+    writeFileSync(join(dist, 'v24.99.0', 'SHASUMS256.txt'), `${sha256(archive)}  ${name}.tar.gz\n`);
+    writeFileSync(
+      join(dist, 'index.json'),
+      JSON.stringify([{ version: 'v24.99.0', lts: 'Krypton' }])
+    );
+    const broken = home();
+    const temp = mkdtempSync(join(scratch, 'tmp-'));
+    const corrupt = await run(join(bin, 'sh'), [installSh, '--dir', join(broken, 'bin')], {
+      env: env({
+        HOME: broken,
+        PATH: bin,
+        TMPDIR: temp,
+        SLICC_INSTALL_BASE_URL: pathToFileURL(dir).href,
+        SLICC_NODE_DIST_BASE: pathToFileURL(dist).href,
+      }),
+    });
+    assert.equal(corrupt.status, 1);
+    assert.match(
+      corrupt.stderr,
+      new RegExp(`install\\.sh: could not unpack ${name}\\.tar\\.gz\n$`)
+    );
+    assert.deepEqual(readdirSync(join(broken, '.local/share/slicc-capture')), []);
+    assert.deepEqual(readdirSync(temp), []);
+    assert.ok(!existsSync(join(broken, 'bin', 'sccapture')));
   });
 });
 
@@ -729,6 +784,43 @@ describe('install.ps1', () => {
         /install\.ps1: the execution policy is Restricted, so PowerShell won't run sccapture\.ps1; run Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, or use sccapture\.cmd/
       );
       assert.doesNotMatch(result.stderr, /execution policy/);
+      const strict =
+        "$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'";
+      const strictLocal = home();
+      const strictBin = join(strictLocal, 'bin');
+      const strictInstall = await run(
+        pwsh,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `${strict}; & $env:T_PS1 -Dir $env:T_DIR; exit $LASTEXITCODE`,
+        ],
+        {
+          env: env({
+            LOCALAPPDATA: strictLocal,
+            SLICC_INSTALL_BASE_URL: url,
+            T_PS1: installPs1,
+            T_DIR: strictBin,
+          }),
+        }
+      );
+      assert.equal(strictInstall.status, 0, strictInstall.stderr);
+      assert.equal(
+        strictInstall.stdout.split(/\r?\n/)[0],
+        `sccapture ${version} installed to ${join(strictBin, 'sccapture.ps1')}`
+      );
+      const strictRun = await run(
+        pwsh,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `${strict}; & $env:T_LAUNCHER --nope 2>$null; 'code=' + $LASTEXITCODE`,
+        ],
+        { env: env({ T_LAUNCHER: join(strictBin, 'sccapture.ps1') }) }
+      );
+      assert.equal(strictRun.stdout.trim(), 'code=2', strictRun.stderr);
       const help = await run(pwsh, ['-NoProfile', '-File', installPs1, '-Help'], { env: env({}) });
       assert.equal(help.status, 0);
       assert.match(help.stdout, /^usage: install\.ps1 \[-Version VERSION\] \[-Dir DIR\] \[-Help\]/);
@@ -787,9 +879,44 @@ describe('install.ps1', () => {
         failed.stderr,
         /install\.ps1: npm install failed for slicc-capture-0\.7\.0\.tgz/
       );
+      const strictFailed = await run(
+        pwsh,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `${strict}; & $env:T_PS1 -Version 0.7.0 -Dir $env:T_DIR; exit $LASTEXITCODE`,
+        ],
+        {
+          env: env({
+            LOCALAPPDATA: local,
+            SLICC_INSTALL_BASE_URL: url,
+            T_PS1: installPs1,
+            T_DIR: bin,
+            ...npmCache(),
+          }),
+        }
+      );
+      assert.equal(strictFailed.status, 1);
+      assert.match(
+        strictFailed.stderr,
+        /install\.ps1: npm install failed for slicc-capture-0\.7\.0\.tgz/
+      );
+      release(served, '0.6.0');
+      const tgz = join(served, 'slicc-capture-0.6.0.tgz');
+      const whole = readFileSync(tgz);
+      writeFileSync(tgz, whole.subarray(0, whole.length >> 1));
+      writeFileSync(join(served, 'SHA256SUMS'), `${sha256(tgz)}  slicc-capture-0.6.0.tgz\n`);
+      const corrupt = await run(
+        pwsh,
+        ['-NoProfile', '-NonInteractive', '-File', installPs1, '-Version', '0.6.0', '-Dir', bin],
+        { env: env({ LOCALAPPDATA: local, SLICC_INSTALL_BASE_URL: url }) }
+      );
+      assert.equal(corrupt.status, 1);
+      assert.match(corrupt.stderr, /install\.ps1: could not unpack slicc-capture-0\.6\.0\.tgz/);
       assert.deepEqual(
         readdirSync(join(local, 'slicc-capture')).filter(
-          (name) => !/^\d/.test(name) || name === '0.7.0'
+          (name) => !/^\d/.test(name) || name === '0.7.0' || name === '0.6.0'
         ),
         []
       );

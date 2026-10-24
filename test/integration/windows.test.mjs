@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -283,6 +284,58 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
         2
       );
 
+      const strict =
+        "$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = 'Stop'";
+      const strictLocal = mkdtempSync(join(scratch, 'local-'));
+      const strictBin = join(strictLocal, 'bin');
+      const strictInstall = await ps(
+        exe,
+        `${strict}; & $env:T_PS1 -Dir $env:T_DIR; exit $LASTEXITCODE`,
+        clean({
+          LOCALAPPDATA: strictLocal,
+          SLICC_INSTALL_BASE_URL: base,
+          T_PS1: installPs1,
+          T_DIR: strictBin,
+        })
+      );
+      assert.equal(strictInstall.status, 0, strictInstall.stderr);
+      assert.equal(
+        lines(strictInstall.stdout)[0],
+        `sccapture ${version} installed to ${join(strictBin, 'sccapture.ps1')}`
+      );
+      const strictRun = await ps(
+        exe,
+        `${strict}; & $env:T_LAUNCHER --nope 2>$null; 'code=' + $LASTEXITCODE; 'eap=' + $ErrorActionPreference; 'native=' + $PSNativeCommandUseErrorActionPreference`,
+        { ...env, T_LAUNCHER: join(strictBin, 'sccapture.ps1') }
+      );
+      assert.deepEqual(
+        lines(strictRun.stdout),
+        ['code=2', 'eap=Stop', 'native=True'],
+        strictRun.stderr
+      );
+      const corruptBase = release(`corrupt-${shell}`, '0.6.0');
+      const corruptDir = join(served, `corrupt-${shell}`);
+      const tgz = join(corruptDir, 'slicc-capture-0.6.0.tgz');
+      const whole = readFileSync(tgz);
+      writeFileSync(tgz, whole.subarray(0, whole.length >> 1));
+      writeFileSync(join(corruptDir, 'SHA256SUMS'), `${sha256(tgz)}  slicc-capture-0.6.0.tgz\n`);
+      const strictCorrupt = await ps(
+        exe,
+        `${strict}; & $env:T_PS1 -Version 0.6.0 -Dir $env:T_DIR 2>&1; exit $LASTEXITCODE`,
+        clean({
+          LOCALAPPDATA: strictLocal,
+          SLICC_INSTALL_BASE_URL: corruptBase,
+          T_PS1: installPs1,
+          T_DIR: strictBin,
+        })
+      );
+      assert.equal(strictCorrupt.status, 1, strictCorrupt.stdout);
+      assert.match(
+        strictCorrupt.stderr,
+        /install\.ps1: could not unpack slicc-capture-0\.6\.0\.tgz/
+      );
+      assert.ok(!existsSync(join(strictLocal, 'slicc-capture', '0.6.0')));
+
       const pages = await batch(`chcp & "${launcher}" --version & chcp`, env);
       const [before, , after] = lines(pages.stdout);
       assert.equal(before, after, pages.stdout);
@@ -535,6 +588,54 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
     const local = mkdtempSync(join(scratch, 'local-'));
     const bin = join(local, 'bin');
     const bare = `${system};${dirname(system)};${dirname(powershell)}`;
+    const zip = release('zip', version);
+    const badDist = join(served, 'bad-dist');
+    mkdirSync(join(badDist, 'v24.99.0'), { recursive: true });
+    const badArchive = join(badDist, 'v24.99.0', `${name}.zip`);
+    const whole = readFileSync(archive);
+    writeFileSync(badArchive, whole.subarray(0, whole.length >> 1));
+    writeFileSync(
+      join(badDist, 'v24.99.0', 'SHASUMS256.txt'),
+      `${sha256(badArchive)}  ${name}.zip\n`
+    );
+    writeFileSync(
+      join(badDist, 'index.json'),
+      JSON.stringify([{ version: 'v24.99.0', lts: 'Krypton' }])
+    );
+    const badLocal = mkdtempSync(join(scratch, 'local-'));
+    const temp = mkdtempSync(join(scratch, 'temp-'));
+    const corrupt = await run(
+      powershell,
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        installPs1,
+        '-Dir',
+        join(badLocal, 'bin'),
+      ],
+      {
+        env: withPath(
+          clean({
+            LOCALAPPDATA: badLocal,
+            TEMP: temp,
+            TMP: temp,
+            SLICC_INSTALL_BASE_URL: zip,
+            SLICC_NODE_DIST_BASE: `${url}/bad-dist`,
+          }),
+          bare
+        ),
+      }
+    );
+    assert.equal(corrupt.status, 1);
+    assert.match(corrupt.stderr, new RegExp(`install\\.ps1: could not unpack ${name}\\.zip`));
+    assert.ok(!existsSync(join(badLocal, 'slicc-capture', 'node')));
+    assert.deepEqual(
+      readdirSync(temp).filter((entry) => entry.startsWith('sccapture-')),
+      []
+    );
     const result = await run(
       powershell,
       [
@@ -551,7 +652,7 @@ describe('on real Windows', { skip: !onWindows && 'not Windows' }, () => {
         env: withPath(
           clean({
             LOCALAPPDATA: local,
-            SLICC_INSTALL_BASE_URL: release('zip', version),
+            SLICC_INSTALL_BASE_URL: zip,
             SLICC_NODE_DIST_BASE: `${url}/dist`,
           }),
           bare

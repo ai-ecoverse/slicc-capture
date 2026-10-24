@@ -18,7 +18,10 @@ function version(entry) {
 async function download(url, timeout) {
   try {
     const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeout) });
-    if (!response.ok) return { error: `could not download ${url}: HTTP ${response.status}` };
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return { error: `could not download ${url}: HTTP ${response.status}` };
+    }
     return { text: await response.text() };
   } catch (error) {
     if (error.name === 'TimeoutError') return { error: 'download timed out' };

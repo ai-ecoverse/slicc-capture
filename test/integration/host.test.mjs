@@ -965,6 +965,41 @@ describe('--upgrade', () => {
     assert.equal(broken.code, 1);
   });
 
+  it('drops the body of a failed download', async () => {
+    let closed;
+    const gone = new Promise((done) => {
+      closed = done;
+    });
+    const endless = createServer((request, response) => {
+      response.writeHead(500);
+      response.write('still going\n');
+      response.on('close', closed);
+    });
+    await new Promise((done) => endless.listen(0, '127.0.0.1', done));
+    try {
+      const at = `http://127.0.0.1:${endless.address().port}`;
+      const result = await capture({
+        platform: 'linux',
+        argv: ['--upgrade'],
+        timeout: 30000,
+        extra: { SCCAPTURE_INSTALL_DIR: '/d', SLICC_INSTALL_BASE_URL: at },
+      });
+      assert.deepEqual(
+        [result.code, result.stderr],
+        [1, `sccapture: could not download ${at}/install.sh: HTTP 500\n`]
+      );
+      let timer;
+      const late = new Promise((done) => {
+        timer = setTimeout(() => done('open'), 2000);
+      });
+      assert.equal(await Promise.race([gone.then(() => 'closed'), late]), 'closed');
+      clearTimeout(timer);
+    } finally {
+      endless.closeAllConnections();
+      endless.close();
+    }
+  });
+
   it('gives up on a download that never answers, after the timeout', async () => {
     const sockets = new Set();
     const silent = createServer(() => {});
