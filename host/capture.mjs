@@ -4,7 +4,7 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { darwin } from './darwin.mjs';
 import { linux } from './linux.mjs';
-import { check, names, parse, settings, usage } from './options.mjs';
+import { check, help, names, parse, settings, usage } from './options.mjs';
 import { say } from './tools.mjs';
 import { upgrade } from './upgrade.mjs';
 import { windows } from './windows.mjs';
@@ -23,16 +23,16 @@ export async function run({
   const os = names[platform] ? platform : 'linux';
   const parsed = parse(argv);
   if (parsed.help) {
-    say(fds[1], usage);
+    say(fds[1], help(os));
     return 0;
   }
   if (parsed.error) {
-    say(fds[2], `sccapture: ${parsed.error}\n${usage}`);
+    say(fds[2], `sccapture: ${parsed.error}\n${usage(os)}`);
     return 2;
   }
   if (parsed.special.length) {
     if (argv.length > 1) {
-      say(fds[2], `sccapture: ${parsed.special[0]}: takes no other arguments\n${usage}`);
+      say(fds[2], `sccapture: ${parsed.special[0]}: takes no other arguments\n${usage(os)}`);
       return 2;
     }
     if (parsed.special[0] === '--upgrade')
@@ -49,7 +49,7 @@ export async function run({
   const o = settings(parsed.options);
   const free = os === 'darwin' && parsed.options.some((option) => optional.includes(option.letter));
   if (!parsed.files.length && !o.clipboard && !free) {
-    say(fds[2], `sccapture: output file required (or use -c for clipboard)\n${usage}`);
+    say(fds[2], `sccapture: output file required (or use -c for clipboard)\n${usage(os)}`);
     return 2;
   }
   if (os === 'darwin') return darwin({ parsed, o, env, platform: os, fds });

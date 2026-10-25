@@ -4,6 +4,28 @@ dev=/dev/embedder
 usage() {
   printf 'usage: %s [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n' "$me"
 }
+row() {
+  printf '  %-17s %s\n' "$1" "$2"
+}
+guide() {
+  usage
+  printf '\nCaptures a screen, window or tab that the user picks in the browser.\n\n'
+  row '-c, --clipboard' 'copy a PNG to the clipboard instead of a file'
+  row -C 'ask the browser to include the cursor'
+  row '-D display' 'as -m: the user picks the screen'
+  row '-J style' 'window, as -W'
+  row -m 'prefer a screen in the picker'
+  row '-R x,y,w,h' "crop to that rectangle, in the capture's pixels"
+  row '-t format' "png, jpg or webp; else the file's extension, else png"
+  row '-T seconds' 'wait that long after the picker'
+  row '-v, --view' 'show the capture inline in the tool result'
+  row -w 'prefer a window in the picker'
+  row -W 'as -w'
+  row --version 'print the version'
+  row --upgrade 'print the command that upgrades it'
+  row '-h, --help' 'print this help'
+  printf "\n-a, -d, -i, -o, -r, -x: accepted, as macOS's screencapture takes them, and do nothing.\n"
+}
 say() {
   printf '%s: %s\n' "$me" "$1" >&2
 }
@@ -229,7 +251,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "$help" ]; then
-  usage
+  guide
   exit 0
 fi
 [ -z "$wrong" ] || bad "$wrong"

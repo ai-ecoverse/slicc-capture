@@ -21,8 +21,15 @@ import { fakeExe } from './fake-windows.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'slicc-capture-host-')));
-const usage =
-  'usage: sccapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n';
+const usages = {
+  darwin:
+    'usage: sccapture [-abcdimoprsuwxCMPSUW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [-l windowid] [-B bundleid] [file ...]\n',
+  linux:
+    'usage: sccapture [-acdiorswxCPW] [-t format] [-T seconds] [-R x,y,w,h] [-J style] [-l windowid] [file]\n',
+  win32:
+    'usage: sccapture [-acdmorxCP] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [file]\n',
+};
+const usage = usages.linux;
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
 const onWindows = process.platform === 'win32';
 const posix = { skip: onWindows && 'needs POSIX fakes' };
@@ -145,15 +152,51 @@ function decoded(argv) {
 
 describe('the options', () => {
   for (const platform of ['darwin', 'linux', 'win32']) {
-    it(`prints the usage for -h or --help anywhere on ${platform}`, async () => {
+    it(`prints the help for -h or --help anywhere on ${platform}`, async () => {
+      const first = await capture({ platform, argv: ['-h'] });
       for (const argv of [['-h'], ['--help'], ['-xh'], ['-Z', 'f', '-h'], ['--version', '-h']]) {
         const result = await capture({ platform, argv });
         assert.deepEqual(
           [result.code, result.stdout, result.stderr],
-          [0, usage, ''],
+          [0, first.stdout, ''],
           argv.join(' ')
         );
         assert.deepEqual(result.calls, []);
+      }
+      assert.ok(first.stdout.startsWith(`${usages[platform]}\nCaptures the screen with `));
+      for (const row of ['--version', '--upgrade', '-h, --help', '-c, --clipboard']) {
+        assert.match(first.stdout, new RegExp(`^  ${row} +\\S`, 'm'), row);
+      }
+    });
+
+    it(`lists in the usage and the help exactly the options it takes on ${platform}`, async () => {
+      const { stdout } = await capture({ platform, argv: ['--help'] });
+      const line = usages[platform];
+      const all = 'abBcCdDgGiJklmMoprPRsStTuUvVwWx';
+      const values = {
+        B: 'x',
+        D: '1',
+        G: '1',
+        J: 'window',
+        l: '1',
+        R: '0,0,1,1',
+        t: 'png',
+        T: '0',
+        V: '1',
+      };
+      for (const letter of all) {
+        const argv = values[letter] ? [`-${letter}`, values[letter], '-c'] : [`-${letter}`, '-c'];
+        const result = await capture({ platform, names: [], argv });
+        const refused = result.stderr.includes(`-${letter}: not supported on`);
+        const listed = values[letter]
+          ? line.includes(`[-${letter} `)
+          : new RegExp(`\\[-[a-zA-Z]*${letter}[a-zA-Z]*\\]`).test(line);
+        const described =
+          new RegExp(`^  -${letter}[ ,]`, 'm').test(stdout) ||
+          stdout.includes(`-${letter}, `) ||
+          stdout.includes(`-${letter}: accepted`);
+        assert.equal(listed, !refused, `-${letter} in the usage`);
+        assert.equal(described, !refused, `-${letter} in the help`);
       }
     });
   }
@@ -217,7 +260,7 @@ describe('the options', () => {
       });
       assert.deepEqual(
         [result.code, result.stderr],
-        [2, `sccapture: output file required (or use -c for clipboard)\n${usage}`]
+        [2, `sccapture: output file required (or use -c for clipboard)\n${usages[platform]}`]
       );
       assert.deepEqual(result.calls, []);
     }

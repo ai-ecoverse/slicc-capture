@@ -62,7 +62,7 @@ or without installing, `npx -p @ai-ecoverse/slicc-capture sccapture shot.png`.
 usage: screencapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]
 ```
 
-Short options may be grouped (`-xc`), an option's value may be attached or separate (`-T3`, `-T 3`), and `--` ends the options. `--clipboard` is `-c` and `--view` is `-v`, as in slicc 6. `-h` or `--help` anywhere prints the usage to stdout and exits 0. `--version` and `--upgrade` are described [below](#--upgrade); either must be the only argument, else `<cmd>: <opt>: takes no other arguments` and the usage to stderr, exit 2. An option without its value prints `<cmd>: <opt>: option requires a value` and the usage to stderr, exit 2.
+Short options may be grouped (`-xc`), an option's value may be attached or separate (`-T3`, `-T 3`), and `--` ends the options. `--clipboard` is `-c` and `--view` is `-v`, as in slicc 6. `-h` or `--help` anywhere prints the help to stdout and exits 0: the usage line, one line on what the command captures with, a line for each option it takes, `--version`, `--upgrade` and `--help`, and then the no-ops (`-a, -d, -i, -o, -r, -x` in SLICC). `--version` and `--upgrade` are described [below](#--upgrade); either must be the only argument, else `<cmd>: <opt>: takes no other arguments` and the usage to stderr, exit 2. An option without its value prints `<cmd>: <opt>: option requires a value` and the usage to stderr, exit 2.
 
 ### In SLICC
 
@@ -195,7 +195,15 @@ Only `sccapture` is installed on a host (the package's `bin`, a small Node scrip
 
 - **The file and its format:** without `-t`, the file's extension picks the format (on macOS, `sccapture` adds `-t` for `.jpg`, `.jpeg`, `.pdf`, `.tiff`, `.gif` and `.bmp`), else PNG. `-c` copies PNG; a file, `-t` and `-P` are then ignored, except on macOS, where `screencapture` decides. Success prints nothing, as `screencapture` does.
 - **A file is required**, as in SLICC (`sccapture: output file required (or use -c for clipboard)`, exit 2), except on macOS with `-p`, `-u`, `-P`, `-M` or `-B`, which `screencapture` handles without one.
-- **Errors:** with no tool on `PATH`, `sccapture: no screenshot tool found (tried grim, gnome-screenshot)` (the names tried on that platform) to stderr, exit 1; with `-c` and no clipboard tool, `sccapture: no clipboard tool found (tried wl-copy, xclip)`, exit 1. A tool that fails, a cancelled selection included, has its stderr passed through, exit 1. An unknown option prints `sccapture: unknown option: <arg>` and the usage to stderr, exit 2; an option the table marks as not supported on that platform prints `sccapture: <opt>: not supported on <platform>`, exit 2. The values of `-T`, `-R`, `-D` and `-J` are checked as in SLICC, and `-l` takes a window id in decimal or `0x` hex, else `sccapture: -l: invalid window: <value>`, exit 2. `-h` and `--help` print the usage to stdout and exit 0.
+- **Errors:** with no tool on `PATH`, `sccapture: no screenshot tool found (tried grim, gnome-screenshot)` (the names tried on that platform) to stderr, exit 1; with `-c` and no clipboard tool, `sccapture: no clipboard tool found (tried wl-copy, xclip)`, exit 1. A tool that fails, a cancelled selection included, has its stderr passed through, exit 1. An unknown option prints `sccapture: unknown option: <arg>` and the usage to stderr, exit 2; an option the table marks as not supported on that platform prints `sccapture: <opt>: not supported on <platform>`, exit 2. The values of `-T`, `-R`, `-D` and `-J` are checked as in SLICC, and `-l` takes a window id in decimal or `0x` hex, else `sccapture: -l: invalid window: <value>`, exit 2. The usage, on errors and as the first line of the help, names only the options the platform takes:
+
+```
+usage: sccapture [-abcdimoprsuwxCMPSUW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [-l windowid] [-B bundleid] [file ...]
+usage: sccapture [-acdiorswxCPW] [-t format] [-T seconds] [-R x,y,w,h] [-J style] [-l windowid] [file]
+usage: sccapture [-acdmorxCP] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [file]
+```
+
+on macOS, Linux and Windows. `-h` and `--help` print the help to stdout and exit 0, as in SLICC: the usage, `Captures the screen with <tool>.`, a line for each option the platform takes, and, on Linux and Windows, `-a, -d, -o, -r, -x`, which do nothing there.
 - **Other Unix systems** are treated as Linux.
 
 ### Linux

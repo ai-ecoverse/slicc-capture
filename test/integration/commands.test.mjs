@@ -221,12 +221,23 @@ describe('on the kernel', () => {
 
   it('prints the usage, and refuses unknown options, missing values and a missing file', async () => {
     for (const name of names) {
+      const help = await sh(`${name} -h`);
       for (const args of ['-h', '--help', 'f.png -h', '-xh', '-Z -h', '--version --help']) {
         assert.deepEqual(
           await sh(`${name} ${args}`),
-          { status: 0, stdout: usage(name), stderr: '' },
+          { status: 0, stdout: help.stdout, stderr: '' },
           args
         );
+      }
+      assert.ok(help.stdout.startsWith(`${usage(name)}\nCaptures a screen, window or tab `));
+      for (const row of [
+        '-c, --clipboard',
+        '-v, --view',
+        '-R x,y,w,h',
+        '--upgrade',
+        '-h, --help',
+      ]) {
+        assert.match(help.stdout, new RegExp(`^  ${row} +\\S`, 'm'), row);
       }
       const cases = [
         ['-Z f.png', 'unknown option: -Z'],

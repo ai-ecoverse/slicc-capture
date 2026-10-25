@@ -1,8 +1,110 @@
 const flags = 'abcCdgiklmMoprPsSuUvwWx';
 const valued = 'BDGJlRtTV';
 
-export const usage =
-  'usage: sccapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n';
+const args = {
+  t: 'format',
+  T: 'seconds',
+  R: 'x,y,w,h',
+  D: 'display',
+  J: 'style',
+  l: 'windowid',
+  B: 'bundleid',
+};
+
+const noop = 'adorx';
+
+const said = {
+  darwin: {
+    tool: "macOS's screencapture, which gets the options as given",
+    a: "don't capture windows attached to the window",
+    b: 'capture the Touch Bar',
+    B: 'open the capture in that app',
+    c: 'copy to the clipboard instead of a file',
+    C: 'include the cursor',
+    d: 'show errors graphically',
+    D: 'capture that display (1 is the main one)',
+    i: 'select a region or a window interactively',
+    J: 'start in selection, window or video mode',
+    l: 'capture that window',
+    m: 'capture the main monitor only',
+    M: 'open the capture in a new Mail message',
+    o: "leave out the window's shadow",
+    p: 'use the screenshot settings; no file needed',
+    P: 'open the capture in Preview',
+    r: "don't add dpi metadata",
+    R: 'capture that rectangle',
+    s: 'select a region with the mouse only',
+    S: 'in window mode, capture the screen, not the window',
+    t: 'png (the default), jpg, pdf, tiff, gif, bmp, ...',
+    T: 'wait that long before capturing',
+    u: 'show the screenshot UI afterwards; no file needed',
+    U: 'show the interactive toolbar',
+    w: 'select a window only',
+    W: 'start in window selection',
+    x: "don't play sounds",
+  },
+  linux: {
+    tool: 'grim, gnome-screenshot, import or scrot, whichever handles the options',
+    c: 'copy to the clipboard (PNG) instead of a file',
+    C: 'include the cursor',
+    i: 'select a region or a window interactively',
+    J: 'selection (as -s) or window (as -w)',
+    l: 'capture that window (import only)',
+    P: 'open the file afterwards, with xdg-open',
+    R: 'capture that rectangle',
+    s: 'select a region with the mouse',
+    t: "png or jpg; else the file's extension, else png",
+    T: 'wait that long before capturing',
+    w: 'select a window with the mouse',
+    W: 'as -w',
+  },
+  win32: {
+    tool: 'PowerShell',
+    c: 'copy to the clipboard (PNG) instead of a file',
+    C: 'draw the cursor into the image',
+    D: 'capture that screen (1 is the primary one)',
+    m: 'capture the primary screen only',
+    P: 'open the file afterwards',
+    R: 'capture that rectangle of the screen (all of them, or -m or -D)',
+    t: "png, jpg, bmp, gif or tiff; else the file's extension, else png",
+    T: 'wait that long before capturing',
+  },
+};
+
+export function usage(platform) {
+  const own = (letter) => !unsupported[platform].includes(letter);
+  const letters = [...flags].filter((letter) => own(letter) && !valued.includes(letter));
+  const lower = letters.filter((letter) => letter === letter.toLowerCase()).join('');
+  const upper = letters.filter((letter) => letter !== letter.toLowerCase()).join('');
+  const values = Object.keys(args)
+    .filter(own)
+    .map((letter) => ` [-${letter} ${args[letter]}]`)
+    .join('');
+  const files = platform === 'darwin' ? '[file ...]' : '[file]';
+  return `usage: sccapture [-${lower}${upper}]${values} ${files}\n`;
+}
+
+export function help(platform) {
+  const text = said[platform];
+  const rows = Object.keys(text)
+    .filter((key) => key.length === 1)
+    .map((letter) => {
+      const name =
+        letter === 'c' ? '-c, --clipboard' : `-${letter}${args[letter] ? ` ${args[letter]}` : ''}`;
+      return [name, text[letter]];
+    });
+  rows.push(
+    ['--version', 'print the version'],
+    ['--upgrade', 'upgrade to the latest release'],
+    ['-h, --help', 'print this help']
+  );
+  const lines = rows.map(([name, what]) => `  ${name.padEnd(17)} ${what}\n`).join('');
+  const quiet =
+    platform === 'darwin'
+      ? ''
+      : `\n${[...noop].map((letter) => `-${letter}`).join(', ')}: accepted, as macOS's screencapture takes them, and do nothing.\n`;
+  return `${usage(platform)}\nCaptures the screen with ${text.tool}.\n\n${lines}${quiet}`;
+}
 
 const long = { '--clipboard': 'c', '--view': 'v' };
 
