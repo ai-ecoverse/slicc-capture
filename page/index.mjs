@@ -190,8 +190,11 @@ function mix(env, track, audio) {
   return { tracks: [track, ...destination.stream.getAudioTracks()], context };
 }
 
-function supported(request, display, env) {
+function supported(request, display, userMedia, env) {
   if (typeof display !== 'function') throw fail('NotSupportedError', unsupported);
+  if (request.microphone && typeof userMedia !== 'function') {
+    throw fail('NotSupportedError', 'this page does not record the microphone');
+  }
   if (request.video) {
     if (!env('MediaRecorder') || !env('MediaStream')) throw fail('NotSupportedError', unsupported);
     choose(env, request.type, false);
@@ -200,11 +203,9 @@ function supported(request, display, env) {
   }
 }
 
-async function listen(env, userMedia, microphone, signal) {
-  const ask =
-    userMedia ?? ((constraints) => env('navigator').mediaDevices.getUserMedia(constraints));
+async function listen(userMedia, microphone, signal) {
   const audio = microphone === true ? true : { deviceId: { exact: microphone } };
-  const pending = Promise.resolve().then(() => ask({ audio, video: false }));
+  const pending = Promise.resolve().then(() => userMedia({ audio, video: false }));
   try {
     return await race(pending, signal);
   } catch (error) {
@@ -287,7 +288,7 @@ export function create(overrides = {}) {
     userMedia,
   }) {
     const request = parse(options);
-    supported(request, display, env);
+    supported(request, display, userMedia, env);
     const local = new AbortController();
     const forward = () => local.abort(signal.reason);
     if (signal.aborted) forward();
@@ -316,8 +317,7 @@ export function create(overrides = {}) {
       }
       if (request.video) {
         if (request.constraints.audio && !audible(stream).length) progress('no audio was shared');
-        if (request.microphone)
-          mic = await listen(env, userMedia, request.microphone, local.signal);
+        if (request.microphone) mic = await listen(userMedia, request.microphone, local.signal);
         const { type, duration } = request;
         const reply = film({ env, stream, mic, track, type, duration, signal, progress });
         keep = true;

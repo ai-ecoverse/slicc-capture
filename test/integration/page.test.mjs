@@ -493,17 +493,13 @@ function studio(overrides = {}) {
       this.closed += 1;
     }
   }
-  const navigator = {
-    mediaDevices: {
-      getUserMedia: async (constraints) => {
-        tape.asked.push(constraints);
-        tape.mic = media(new Track('audio'));
-        return tape.mic;
-      },
-    },
-  };
-  const state = setup({ MediaRecorder, MediaStream, AudioContext, navigator, ...overrides });
+  const state = setup({ MediaRecorder, MediaStream, AudioContext, ...overrides });
   state.tape = tape;
+  state.userMedia = async (constraints) => {
+    tape.asked.push(constraints);
+    tape.mic = media(new Track('audio'));
+    return tape.mic;
+  };
   return state;
 }
 
@@ -611,6 +607,18 @@ describe('the page module recording', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(asked, [{ audio: { deviceId: { exact: 'dev1' } }, video: false }]);
     assert.deepEqual(state.tape.asked, []);
+  });
+
+  it('refuses the microphone before the picker when the embedder passes no userMedia', async () => {
+    const state = studio();
+    state.userMedia = undefined;
+    const result = await sh('screencapture -v -g v.webm');
+    assert.deepEqual(result, {
+      status: 1,
+      stdout: '',
+      stderr: 'screencapture: this page does not record the microphone\n',
+    });
+    assert.deepEqual(state.constraints, []);
   });
 
   it('says when no audio was shared', async () => {

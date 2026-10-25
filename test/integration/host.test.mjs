@@ -976,7 +976,7 @@ const tail = ['-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p']
 
 describe('videos on Linux', posix, () => {
   const film = (names, argv, extra, more) =>
-    capture({ platform: 'linux', names, argv, extra, ...more });
+    capture({ platform: 'linux', names, argv, extra: { DISPLAY: '', ...extra }, ...more });
 
   it('records with ffmpeg under X11, as the table says', async () => {
     const x = (...args) => ['-f', 'x11grab', ...args];
@@ -1298,7 +1298,7 @@ describe('videos on Windows', () => {
   });
 });
 
-describe('standard output on a host', () => {
+describe('standard output on a host', posix, () => {
   it('writes the capture to standard output for -, and leaves no file', async () => {
     for (const [platform, names, argv, extra, made] of [
       ['linux', ['scrot'], ['-'], {}, 'capture.png'],
@@ -1308,7 +1308,6 @@ describe('standard output on a host', () => {
       ['darwin', ['screencapture'], ['-x', '-'], {}, 'capture.png'],
       ['darwin', ['screencapture'], ['-V', '1', '-'], {}, 'capture.mov'],
     ]) {
-      if (onWindows) continue;
       const result = await capture({ platform, names, argv, extra });
       const how = `${platform} ${argv.join(' ')}`;
       assert.deepEqual([result.code, result.stderr], [0, ''], how);
