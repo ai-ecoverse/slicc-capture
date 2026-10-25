@@ -4,7 +4,7 @@ import { boot, bootWithoutEmbedder } from './kernel.mjs';
 
 const names = ['screencapture', 'sccapture'];
 const usage = (name) =>
-  `usage: ${name} [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n`;
+  `usage: ${name} [-acdgimorvwxACPW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [-V seconds] [-G id] [file | -]\n`;
 const image = Uint8Array.from({ length: 300000 }, (_, i) => (i * 7 + (i >> 8)) % 256);
 const page = { calls: [], screen: undefined, clipboard: undefined };
 
@@ -147,22 +147,17 @@ describe('on the kernel', () => {
     const cases = [
       ['-b', '-b'],
       ['-B com.apple.Preview', '-B'],
-      ['-g', '-g'],
-      ['-G 1', '-G'],
       ['-k', '-k'],
       ['-l 42', '-l'],
       ['-M', '-M'],
       ['-p', '-p'],
-      ['-P', '-P'],
       ['-s', '-s'],
       ['-S', '-S'],
       ['-u', '-u'],
       ['-U', '-U'],
-      ['-V 5', '-V'],
       ['-xs', '-s'],
-      ['-P -b', '-P'],
+      ['-M -b', '-M'],
       ['-J selection', '-J selection'],
-      ['-J video', '-J video'],
       ['-t gif', '-t gif'],
       ['-t pdf', '-t pdf'],
       ['-T 1 -T 2 -t tiff', '-t tiff'],
@@ -232,7 +227,9 @@ describe('on the kernel', () => {
       assert.ok(help.stdout.startsWith(`${usage(name)}\nCaptures a screen, window or tab `));
       for (const row of [
         '-c, --clipboard',
-        '-v, --view',
+        '-P, --view',
+        '-v',
+        '-V seconds',
         '-R x,y,w,h',
         '--upgrade',
         '-h, --help',
@@ -419,9 +416,9 @@ describe('on the kernel', () => {
     }
   });
 
-  it('writes nothing with -v when it cannot make the temporary file', async () => {
+  it('writes nothing with -P when it cannot make the temporary file', async () => {
     const result = await sh(
-      'rm -rf /tmp/fake /tmp/tmp.* /tmp/screencapture-*; mkdir /tmp/fake && printf \'#!/bin/sh\\n[ "$1" = -d ] && exec /usr/bin/mktemp -d\\nexit 1\\n\' >/tmp/fake/mktemp && chmod +x /tmp/fake/mktemp && PATH=/tmp/fake:$PATH screencapture -v; echo "$?"; ls -d /tmp/tmp.* /tmp/screencapture-* 2>/dev/null; rm -rf /tmp/fake; true'
+      'rm -rf /tmp/fake /tmp/tmp.* /tmp/screencapture-*; mkdir /tmp/fake && printf \'#!/bin/sh\\n[ "$1" = -d ] && exec /usr/bin/mktemp -d\\nexit 1\\n\' >/tmp/fake/mktemp && chmod +x /tmp/fake/mktemp && PATH=/tmp/fake:$PATH screencapture -P; echo "$?"; ls -d /tmp/tmp.* /tmp/screencapture-* 2>/dev/null; rm -rf /tmp/fake; true'
     );
     assert.deepEqual(result, {
       status: 0,
@@ -491,29 +488,29 @@ describe('on the kernel', () => {
     assert.equal(failed.stderr, 'screencapture: failed to copy to clipboard: I/O error\n');
   });
 
-  it('shows the capture inline with -v, as an <img:path> marker', async () => {
-    const file = await sh('mkdir -p /tmp/v && cd /tmp/v && screencapture -v shot.jpg');
+  it('shows the capture inline with -P, as an <img:path> marker', async () => {
+    const file = await sh('mkdir -p /tmp/v && cd /tmp/v && screencapture -P shot.jpg');
     assert.deepEqual(file, { status: 0, stdout: '<img:/tmp/v/shot.jpg>\n', stderr: '' });
     assert.deepEqual(await read('/tmp/v/shot.jpg'), image);
     assert.equal(page.calls[0].options.type, 'image/jpeg');
     const absolute = await sh('screencapture --view /tmp/v/a.png');
     assert.equal(absolute.stdout, '<img:/tmp/v/a.png>\n');
-    const dot = await sh('cd /tmp/v && screencapture -v ./b.png');
+    const dot = await sh('cd /tmp/v && screencapture -P ./b.png');
     assert.equal(dot.stdout, '<img:/tmp/v/b.png>\n');
-    const up = await sh('mkdir -p /tmp/v/d && cd /tmp/v && screencapture -v d/../c.png');
+    const up = await sh('mkdir -p /tmp/v/d && cd /tmp/v && screencapture -P d/../c.png');
     assert.equal(up.stdout, '<img:/tmp/v/c.png>\n');
     const top = await sh(
-      'cd / && screencapture -v tmp/v/e.png && screencapture -v /tmp/../tmp/v/e.png'
+      'cd / && screencapture -P tmp/v/e.png && screencapture -P /tmp/../tmp/v/e.png'
     );
     assert.equal(top.stdout, '<img:/tmp/v/e.png>\n<img:/tmp/v/e.png>\n');
-    const root = await sh('cd / && screencapture -v f.png && rm /f.png');
+    const root = await sh('cd / && screencapture -P f.png && rm /f.png');
     assert.equal(root.stdout, '<img:/f.png>\n');
-    const bare = await sh('screencapture -v');
+    const bare = await sh('screencapture -P');
     const path = /^<img:(\/tmp\/screencapture-\w+\.png)>\n$/.exec(bare.stdout)?.[1];
     assert.ok(path, bare.stdout);
     assert.deepEqual(await read(path), image);
     page.calls = [];
-    const both = await sh('sccapture -cv -t webp f.webp');
+    const both = await sh('sccapture -cP -t webp f.webp');
     const lines = both.stdout.split('\n');
     assert.equal(lines[0], 'captured 293 KB to clipboard');
     assert.match(lines[1], /^<img:\/tmp\/screencapture-\w+\.png>$/);
@@ -540,6 +537,188 @@ describe('on the kernel', () => {
     } finally {
       tool.close();
     }
+  });
+});
+
+function chunks(...parts) {
+  return new ReadableStream({
+    start(controller) {
+      for (const part of parts) controller.enqueue(part);
+      controller.close();
+    },
+  });
+}
+
+function endless(first, signal, abort) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(first);
+      signal.addEventListener('abort', () => {
+        abort(String(signal.reason?.message ?? signal.reason));
+        controller.error(signal.reason);
+      });
+    },
+  });
+}
+
+describe('videos on the kernel', () => {
+  const a = Uint8Array.from({ length: 70000 }, (_, i) => i % 256);
+  const b = Uint8Array.from({ length: 50000 }, (_, i) => (i * 3) % 256);
+  const both = new Uint8Array([...a, ...b]);
+
+  it('records with -v, and writes what the page streams', async () => {
+    page.screen = () => chunks(a, b);
+    const result = await sh('rm -f clip.webm; screencapture -v clip.webm');
+    assert.deepEqual(result, { status: 0, stdout: 'captured 117 KB to clip.webm\n', stderr: '' });
+    assert.deepEqual(await read('/tmp/clip.webm'), both);
+    assert.deepEqual(page.calls[0].options, { type: 'video/webm', cursor: 'never' });
+  });
+
+  it('maps the video options to the request', async () => {
+    const cases = [
+      ['-v x.webm', { type: 'video/webm' }],
+      ['-v x', { type: 'video/webm' }],
+      ['-v x.png', { type: 'video/webm' }],
+      ['-v x.MKV', { type: 'video/webm' }],
+      ['-v x.mp4', { type: 'video/mp4' }],
+      ['-v x.m4v', { type: 'video/mp4' }],
+      ['-v -t mov x.webm', { type: 'video/mp4' }],
+      ['-J video x.mov', { type: 'video/mp4' }],
+      ['-V 3 x.webm', { type: 'video/webm', duration: 3 }],
+      ['-V 007.50 x.webm', { type: 'video/webm', duration: 7.5 }],
+      ['-v -g x.webm', { type: 'video/webm', microphone: true }],
+      ['-v -G abc_1= x.webm', { type: 'video/webm', microphone: 'abc_1=' }],
+      ['-v -G abc -g x.webm', { type: 'video/webm', microphone: 'abc' }],
+      ['-v -A x.webm', { type: 'video/webm', system: true }],
+      [
+        '-vC -m -T 1 x.webm',
+        { type: 'video/webm', cursor: 'always', surface: 'monitor', delay: 1 },
+      ],
+    ];
+    for (const [args, options] of cases) {
+      page.calls = [];
+      page.screen = () => chunks(a);
+      const result = await sh(`screencapture ${args}`);
+      assert.equal(result.status, 0, `${args}: ${result.stderr}`);
+      assert.deepEqual(page.calls[0].options, { cursor: 'never', ...options }, args);
+    }
+  });
+
+  it('refuses what does not go with a video, before asking the page', async () => {
+    const cases = [
+      ['-g f.png', '-g: needs -v'],
+      ['-G x f.png', '-G: needs -v'],
+      ['-A -g f.png', '-A: needs -v'],
+      ['-v -c', '-c: not with -v'],
+      ['-v -P f.webm', '-P: not with -v in SLICC'],
+      ['-v -R 0,0,5,5 f.webm', '-R: not with -v in SLICC'],
+      ['-v -t gif f.webm', '-t gif: not supported in SLICC'],
+      ['-V 0 f.webm', '-V: invalid duration: 0'],
+      ['-V 0.0 f.webm', '-V: invalid duration: 0.0'],
+      ['-V x f.webm', '-V: invalid duration: x'],
+      ['-v -G a,b f.webm', '-G: invalid audio input: a,b'],
+      ['-v -k f.webm', '-k: not supported in SLICC'],
+    ];
+    for (const [args, message] of cases) {
+      const result = await sh(`screencapture ${args}`);
+      assert.deepEqual(
+        result,
+        { status: 2, stdout: '', stderr: `screencapture: ${message}\n` },
+        args
+      );
+    }
+    assert.deepEqual(page.calls, []);
+  });
+
+  it('stops on ^C or a signal, and keeps what was recorded', async () => {
+    for (const signal of ['INT', 'TERM', 'HUP']) {
+      let reason;
+      page.screen = ({ signal: aborted }) => {
+        setTimeout(() => os.sh('kill -' + signal + ' "$(cat /tmp/main)"'), 300);
+        return endless(a, aborted, (why) => {
+          reason = why;
+        });
+      };
+      const result = await sh(
+        'rm -f v.webm; sh -c \'echo $$ >/tmp/main; exec screencapture -v v.webm\'; echo "$?"'
+      );
+      assert.deepEqual(
+        result,
+        { status: 0, stdout: 'captured 68 KB to v.webm\n0\n', stderr: '' },
+        signal
+      );
+      assert.deepEqual(await read('/tmp/v.webm'), a);
+      assert.equal(reason, 'interrupted');
+    }
+  });
+
+  it('says interrupted when stopped before anything was recorded', async () => {
+    page.screen = ({ signal }) =>
+      new Promise((resolve) => {
+        signal.addEventListener('abort', () => resolve(new Uint8Array()));
+        setTimeout(() => os.sh('kill -INT "$(cat /tmp/main)"'), 200);
+      });
+    const result = await sh(
+      'rm -f v.webm; sh -c \'echo $$ >/tmp/main; exec screencapture -v v.webm\'; echo "$?"; test -e v.webm || echo none'
+    );
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: '130\nnone\n',
+      stderr: 'screencapture: interrupted\n',
+    });
+  });
+
+  it('says so when the page sends no video', async () => {
+    page.screen = () => chunks();
+    const result = await sh('screencapture -v v.webm');
+    assert.deepEqual(result, {
+      status: 1,
+      stdout: '',
+      stderr: 'screencapture: the page sent no video\n',
+    });
+  });
+});
+
+describe('standard output on the kernel', () => {
+  it('writes the capture to standard output for -', async () => {
+    const shot = await sh('screencapture - >o.png; echo "$?"');
+    assert.deepEqual(shot, { status: 0, stdout: '0\n', stderr: '' });
+    assert.deepEqual(await read('/tmp/o.png'), image);
+    assert.equal(page.calls[0].options.type, 'image/png');
+    page.calls = [];
+    const typed = await sh('sccapture -t webp -- - | wc -c');
+    assert.deepEqual(typed, { status: 0, stdout: `${image.length}\n`, stderr: '' });
+    assert.equal(page.calls[0].options.type, 'image/webp');
+    page.calls = [];
+    page.screen = () => chunks(image);
+    const video = await sh('screencapture -V 1 - | wc -c');
+    assert.deepEqual(video, { status: 0, stdout: `${image.length}\n`, stderr: '' });
+    assert.deepEqual(page.calls[0].options, { type: 'video/webm', cursor: 'never', duration: 1 });
+  });
+
+  it('refuses a terminal, -P and a second file with -', async () => {
+    const out = [];
+    const term = await os.kernel.openTerminal(['screencapture', '-'], {
+      cwd: '/tmp',
+      onData: (data) => out.push(new TextDecoder().decode(data)),
+    });
+    assert.equal(await term.exited, 2);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(
+      out.join(''),
+      /screencapture: refusing to write to a terminal: redirect standard output or name a file/
+    );
+    for (const [args, message] of [
+      ['-P -', '-P: not with -'],
+      ['- a.png', 'more than one file: not supported in SLICC'],
+    ]) {
+      assert.deepEqual(
+        await sh(`screencapture ${args} | cat`),
+        { status: 0, stdout: '', stderr: `screencapture: ${message}\n` },
+        args
+      );
+    }
+    assert.deepEqual(page.calls, []);
   });
 });
 

@@ -85,3 +85,60 @@ export async function step(name, path, args, options, fds) {
   else say(fds[2], `sccapture: ${name} failed\n`);
   return undefined;
 }
+
+const stops = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+export function record(name, path, args, options, fds) {
+  const { env, stdin = 'ignore', stop, file, duration, wait, signals } = options;
+  return new Promise((resolve) => {
+    const child = spawn(path, args, {
+      env: { ...env, SCCAPTURE_INSTALL_DIR: undefined },
+      stdio: [stop === 'q' ? 'pipe' : stdin, 'ignore', 'pipe'],
+      shell: false,
+      windowsHide: true,
+    });
+    let halted = false;
+    const halt = () => {
+      if (halted) return;
+      halted = true;
+      if (stop === 'q') child.stdin.end('q');
+      else child.kill('SIGINT');
+    };
+    child.stdin?.on('error', () => {});
+    const timer = new AbortController();
+    const done = () => {
+      timer.abort();
+      for (const signal of stops) signals.off(signal, halt);
+    };
+    for (const signal of stops) signals.on(signal, halt);
+    if (duration !== undefined && stop !== 'q') wait(duration, timer.signal).then(halt, () => {});
+    const errors = [];
+    child.stderr.on('data', (chunk) => errors.push(chunk));
+    let failed = false;
+    child.on('error', (error) => {
+      failed = true;
+      done();
+      say(fds[2], `sccapture: ${name}: ${error.message}\n`);
+      resolve(false);
+    });
+    child.on('close', (code) => {
+      done();
+      if (failed) return;
+      if (code === 0 || (halted && written(file))) {
+        resolve(true);
+        return;
+      }
+      const stderr = Buffer.concat(errors);
+      say(fds[2], stderr.length ? stderr : `sccapture: ${name} failed\n`);
+      resolve(false);
+    });
+  });
+}
+
+export function written(file) {
+  try {
+    return statSync(file).size > 0;
+  } catch {
+    return false;
+  }
+}

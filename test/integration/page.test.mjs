@@ -83,7 +83,7 @@ const requests = {
   kinds,
   handle: (request) => {
     fake.signal = request.signal;
-    return fake.page.handle({ ...request, display: fake.display });
+    return fake.page.handle({ ...request, display: fake.display, userMedia: fake.userMedia });
   },
 };
 
@@ -427,6 +427,315 @@ describe('the page module', () => {
     assert.equal(videos[0].muted, true);
     assert.equal(videos[0].srcObject, null);
     assert.equal(videos[0].paused, 1);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+});
+
+function studio(overrides = {}) {
+  const tape = {
+    recorders: [],
+    mimes: ['video/webm;codecs=vp9', 'video/webm;codecs=vp9,opus', 'video/mp4'],
+    asked: [],
+    contexts: [],
+    start: (recorder) =>
+      setTimeout(() => recorder.ondataavailable({ data: new Blob(['one']) }), 10),
+  };
+  class MediaRecorder {
+    static isTypeSupported(type) {
+      return tape.mimes.includes(type);
+    }
+
+    constructor(stream, options) {
+      this.stream = stream;
+      this.options = options;
+      this.state = 'inactive';
+      tape.recorders.push(this);
+    }
+
+    start(slice) {
+      this.slice = slice;
+      this.state = 'recording';
+      tape.start(this);
+    }
+
+    stop() {
+      this.state = 'inactive';
+      this.stops = (this.stops ?? 0) + 1;
+      queueMicrotask(() => {
+        this.ondataavailable({ data: new Blob([]) });
+        this.ondataavailable({ data: new Blob(['end']) });
+        this.onstop();
+      });
+    }
+  }
+  class MediaStream {
+    constructor(tracks) {
+      this.tracks = tracks;
+    }
+  }
+  class AudioContext {
+    constructor() {
+      this.sources = [];
+      this.closed = 0;
+      this.mixed = new Track('audio');
+      tape.contexts.push(this);
+    }
+
+    createMediaStreamDestination() {
+      return { stream: { getAudioTracks: () => [this.mixed] } };
+    }
+
+    createMediaStreamSource(stream) {
+      return { connect: (to) => this.sources.push([stream.tracks, to]) };
+    }
+
+    close() {
+      this.closed += 1;
+    }
+  }
+  const navigator = {
+    mediaDevices: {
+      getUserMedia: async (constraints) => {
+        tape.asked.push(constraints);
+        tape.mic = media(new Track('audio'));
+        return tape.mic;
+      },
+    },
+  };
+  const state = setup({ MediaRecorder, MediaStream, AudioContext, navigator, ...overrides });
+  state.tape = tape;
+  return state;
+}
+
+async function bytes(path) {
+  return new TextDecoder().decode(await os.kernel.readFile(path));
+}
+
+describe('the page module recording', () => {
+  it('records for -V seconds, then stops every track', async () => {
+    const state = studio();
+    const result = await sh('rm -f v.webm; screencapture -V 0.3 v.webm');
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: 'captured 0 KB to v.webm\n',
+      stderr: `${picker}screencapture: recording for 0.3 s…\n`,
+    });
+    assert.equal(await bytes('/tmp/v.webm'), 'oneend');
+    const [recorder] = state.tape.recorders;
+    assert.deepEqual(recorder.options, { mimeType: 'video/webm;codecs=vp9,opus' });
+    assert.equal(recorder.slice, 250);
+    assert.deepEqual(recorder.stream.tracks, state.streams[0].tracks);
+    assert.deepEqual(state.constraints, [{ video: { cursor: 'never' }, audio: false }]);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('picks an mp4 type, and one without audio for a silent capture', async () => {
+    const state = studio();
+    state.display = async (constraints) => {
+      state.constraints.push(constraints);
+      const stream = media(new Track('video'));
+      state.streams.push(stream);
+      return stream;
+    };
+    let result = await sh('screencapture -V 0.1 v.webm');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(state.tape.recorders[0].options, { mimeType: 'video/webm;codecs=vp9' });
+    result = await sh('screencapture -V 0.1 v.mp4');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(state.tape.recorders[1].options, { mimeType: 'video/mp4' });
+  });
+
+  it('stops when the user ends the share', async () => {
+    const state = studio();
+    const display = state.display;
+    state.display = async (constraints) => {
+      const stream = await display(constraints);
+      setTimeout(() => stream.tracks[0].dispatchEvent(new Event('ended')), 200);
+      return stream;
+    };
+    const result = await sh('screencapture -v v.webm');
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: 'captured 0 KB to v.webm\n',
+      stderr: `${picker}screencapture: recording…\n`,
+    });
+    assert.equal(await bytes('/tmp/v.webm'), 'oneend');
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('keeps what was recorded on ^C, and stops the recorder and the tracks', async () => {
+    const state = studio();
+    state.tape.start = (recorder) => {
+      recorder.ondataavailable({ data: new Blob(['one']) });
+      setTimeout(() => os.sh('kill -INT "$(cat /tmp/main)"'), 300);
+    };
+    const result = await sh(
+      'rm -f v.webm; sh -c \'echo $$ >/tmp/main; exec screencapture -v v.webm\'; echo "$?"'
+    );
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: 'captured 0 KB to v.webm\n0\n',
+      stderr: `${picker}screencapture: recording…\n`,
+    });
+    assert.equal(await bytes('/tmp/v.webm'), 'one');
+    assert.equal(state.tape.recorders[0].state, 'inactive');
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('records the microphone too, mixed with the shared audio', async () => {
+    const state = studio();
+    const result = await sh('screencapture -V 0.1 -A -g v.webm');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(state.constraints, [{ video: { cursor: 'never' }, audio: true }]);
+    assert.deepEqual(state.tape.asked, [{ audio: true, video: false }]);
+    const [context] = state.tape.contexts;
+    const [display] = state.streams;
+    assert.deepEqual(state.tape.recorders[0].stream.tracks, [display.tracks[0], context.mixed]);
+    assert.deepEqual(
+      context.sources.map(([tracks]) => tracks),
+      [[display.tracks[1]], [state.tape.mic.tracks[0]]]
+    );
+    assert.equal(context.closed, 1);
+    assert.deepEqual(state.tape.mic.tracks[0].stops, 1);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('asks the embedder for the microphone the header names', async () => {
+    const state = studio();
+    const asked = [];
+    state.userMedia = async (constraints) => {
+      asked.push(constraints);
+      return media(new Track('audio'));
+    };
+    const result = await sh('screencapture -V 0.1 -G dev1 v.webm');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(asked, [{ audio: { deviceId: { exact: 'dev1' } }, video: false }]);
+    assert.deepEqual(state.tape.asked, []);
+  });
+
+  it('says when no audio was shared', async () => {
+    const state = studio();
+    state.display = async (constraints) => {
+      state.constraints.push(constraints);
+      const stream = media(new Track('video'));
+      state.streams.push(stream);
+      return stream;
+    };
+    const result = await sh('screencapture -V 0.1 -A v.webm');
+    assert.equal(
+      result.stderr,
+      `${picker}screencapture: no audio was shared\nscreencapture: recording for 0.1 s…\n`
+    );
+  });
+
+  it('stops the capture when the microphone is refused', async () => {
+    const state = studio();
+    state.userMedia = async () => {
+      throw refusal('NotAllowedError', 'no microphone');
+    };
+    const result = await sh('screencapture -v -g v.webm');
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /user cancelled, permission denied, or the surface is protected\n$/
+    );
+    assert.deepEqual(stopped(state), [1, 1]);
+    assert.equal(state.tape.recorders.length, 0);
+  });
+
+  it('stops a microphone that arrives after an interrupt', async () => {
+    const state = studio();
+    let late;
+    const arrived = new Promise((resolve) => {
+      late = resolve;
+    });
+    const mic = media(new Track('audio'));
+    state.userMedia = () =>
+      new Promise((resolve) => {
+        state.signal.addEventListener('abort', () =>
+          setTimeout(() => {
+            resolve(mic);
+            setTimeout(late, 50);
+          }, 50)
+        );
+        setTimeout(() => os.sh('kill -INT "$(cat /tmp/main)"'), 200);
+      });
+    const result = await sh(
+      'sh -c \'echo $$ >/tmp/main; exec screencapture -v -g v.webm\'; echo "$?"'
+    );
+    assert.equal(result.stdout, '130\n');
+    await arrived;
+    assert.equal(mic.tracks[0].stops, 1);
+  });
+
+  it('fails the recording when the recorder does', async () => {
+    const state = studio();
+    state.tape.start = (recorder) =>
+      setTimeout(() => recorder.onerror({ error: new Error('the encoder broke') }), 50);
+    let result = await sh('rm -f v.webm; screencapture -v v.webm; test -e v.webm || echo none');
+    assert.equal(result.stdout, 'none\n');
+    assert.match(result.stderr, /screencapture: the encoder broke\n$/);
+    assert.deepEqual(stopped(state), [1, 1]);
+    state.tape.start = (recorder) => setTimeout(() => recorder.onerror({}), 50);
+    result = await sh('screencapture -v v.webm');
+    assert.match(result.stderr, /screencapture: the recording failed\n$/);
+  });
+
+  it('refuses a type this browser cannot record, before the picker', async () => {
+    let state = studio();
+    state.tape.mimes = [];
+    let result = await sh('screencapture -v v.mp4');
+    assert.deepEqual(result, {
+      status: 1,
+      stdout: '',
+      stderr: 'screencapture: video/mp4 is not supported by this browser\n',
+    });
+    assert.deepEqual(state.constraints, []);
+    state = studio({ MediaRecorder: undefined });
+    result = await sh('screencapture -v v.webm');
+    assert.equal(result.stderr, 'screencapture: screen capture is not supported in this browser\n');
+    state = studio();
+    state.tape.mimes = ['video/webm;codecs=vp9'];
+    result = await sh('screencapture -V 0.1 v.webm');
+    assert.match(result.stderr, /screencapture: video\/webm is not supported by this browser\n$/);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('checks the video fields of the header', async () => {
+    const state = studio();
+    const display = state.display;
+    const cases = [
+      [{ duration: 0 }, 'invalid duration: 0'],
+      [{ duration: 'x' }, 'invalid duration: "x"'],
+      [{ system: 'yes' }, 'invalid system: "yes"'],
+      [{ microphone: '' }, 'invalid microphone: ""'],
+      [{ microphone: 1 }, 'invalid microphone: 1'],
+    ];
+    for (const [options, message] of cases) {
+      await assert.rejects(
+        state.page.handle({ options: { type: 'video/webm', ...options }, display }),
+        { name: 'TypeError', message },
+        message
+      );
+    }
+    await assert.rejects(
+      state.page.handle({
+        options: { type: 'video/webm', rect: { x: 0, y: 0, width: 1, height: 1 } },
+        display,
+      }),
+      { name: 'NotSupportedError', message: 'rect: not with video' }
+    );
+    assert.deepEqual(state.constraints, []);
+  });
+
+  it('stops when the reader cancels the reply', async () => {
+    const state = studio();
+    const reply = await state.page.handle({
+      options: { type: 'video/webm', system: false, microphone: false },
+      display: state.display,
+    });
+    await reply.cancel();
+    assert.equal(state.tape.recorders[0].state, 'inactive');
     assert.deepEqual(stopped(state), [1, 1]);
   });
 });

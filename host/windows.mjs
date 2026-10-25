@@ -1,5 +1,6 @@
 import { extname } from 'node:path';
-import { lookup, say, step } from './tools.mjs';
+import { ffmpeg } from './linux.mjs';
+import { lookup, record, say, step } from './tools.mjs';
 
 const extensions = {
   '.png': 'png',
@@ -92,7 +93,55 @@ export const script = [
 
 export const encoded = Buffer.from(script, 'utf16le').toString('base64');
 
-export async function windows({ o, file, env, platform, fds, wait }) {
+const opener = Buffer.from('Invoke-Item -LiteralPath $env:SCCAPTURE_FILE', 'utf16le').toString(
+  'base64'
+);
+
+function data(env, values) {
+  const child = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.toUpperCase().startsWith('SCCAPTURE_')) child[key] = value;
+  }
+  for (const [key, value] of Object.entries(values)) if (value !== undefined) child[key] = value;
+  return child;
+}
+
+async function film({ o, file, env, platform, fds, wait, signals }) {
+  const path = lookup('ffmpeg.exe', platform, env);
+  if (!path) {
+    say(fds[2], 'sccapture: no screen recorder found (tried ffmpeg.exe)\n');
+    return 1;
+  }
+  const label = o.last.m?.label ?? o.last.D?.label;
+  if (label) {
+    say(fds[2], `sccapture: ${label}: not supported with ffmpeg.exe\n`);
+    return 2;
+  }
+  const input = ['-f', 'gdigrab', '-draw_mouse', o.cursor ? '1' : '0'];
+  if (o.rect) {
+    const [x, y, w, h] = o.rect;
+    input.push('-offset_x', String(x), '-offset_y', String(y), '-video_size', `${w}x${h}`);
+  }
+  input.push('-i', 'desktop');
+  const sources = o.microphone ? [['-f', 'dshow', '-i', `audio=${o.microphone}`]] : [];
+  await wait(o.delay);
+  const args = ffmpeg(o, file, input, sources);
+  const options = { env, stop: 'q', file, signals };
+  if (!(await record('ffmpeg.exe', path, args, options, fds))) return 1;
+  if (!o.open) return 0;
+  const shell = ['powershell.exe', 'pwsh.exe'].find((name) => lookup(name, platform, env));
+  if (!shell) {
+    say(fds[2], 'sccapture: no viewer found (tried powershell.exe, pwsh.exe)\n');
+    return 1;
+  }
+  const open = ['-NoProfile', '-NonInteractive', '-EncodedCommand', opener];
+  const child = data(env, { SCCAPTURE_FILE: file });
+  return (await step(shell, lookup(shell, platform, env), open, { env: child }, fds)) ? 0 : 1;
+}
+
+export async function windows(context) {
+  if (context.o.video) return film(context);
+  const { o, file, env, platform, fds, wait } = context;
   const names = ['powershell.exe', 'pwsh.exe'];
   const name = names.find((candidate) => lookup(candidate, platform, env));
   if (!name) {
@@ -102,7 +151,7 @@ export async function windows({ o, file, env, platform, fds, wait }) {
   let screen = 'all';
   if (o.display) screen = o.display;
   else if (o.main) screen = 'primary';
-  const data = {
+  const child = data(env, {
     SCCAPTURE_FILE: o.clipboard ? undefined : file,
     SCCAPTURE_FORMAT: o.clipboard
       ? 'png'
@@ -112,12 +161,7 @@ export async function windows({ o, file, env, platform, fds, wait }) {
     SCCAPTURE_SCREEN: screen,
     SCCAPTURE_RECT: o.rect?.join(','),
     SCCAPTURE_OPEN: o.open && !o.clipboard ? '1' : undefined,
-  };
-  const child = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (!key.toUpperCase().startsWith('SCCAPTURE_')) child[key] = value;
-  }
-  for (const [key, value] of Object.entries(data)) if (value !== undefined) child[key] = value;
+  });
   await wait(o.delay);
   const args = ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encoded];
   const done = await step(name, lookup(name, platform, env), args, { env: child }, fds);
