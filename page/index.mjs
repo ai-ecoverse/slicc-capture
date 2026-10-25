@@ -182,12 +182,24 @@ function choose(env, type, audio) {
 }
 
 function mix(env, track, audio) {
-  if (audio.length < 2) return { tracks: [track, ...audio] };
+  if (audio.length < 2) return { tracks: [track, ...audio], close() {} };
   const context = new (env('AudioContext'))();
-  const destination = context.createMediaStreamDestination();
-  const Stream = env('MediaStream');
-  for (const one of audio) context.createMediaStreamSource(new Stream([one])).connect(destination);
-  return { tracks: [track, ...destination.stream.getAudioTracks()], context };
+  let mixed = [];
+  const close = () => {
+    for (const one of mixed) one.stop();
+    context.close();
+  };
+  try {
+    const destination = context.createMediaStreamDestination();
+    const Stream = env('MediaStream');
+    for (const one of audio)
+      context.createMediaStreamSource(new Stream([one])).connect(destination);
+    mixed = destination.stream.getAudioTracks();
+    return { tracks: [track, ...mixed], close };
+  } catch (error) {
+    close();
+    throw error;
+  }
 }
 
 function supported(request, display, userMedia, env) {
@@ -217,8 +229,8 @@ async function listen(userMedia, microphone, signal) {
 function film({ env, stream, mic, track, type, duration, signal, progress }) {
   const audio = [...audible(stream), ...audible(mic)];
   const mimeType = choose(env, type, audio.length > 0);
-  const { tracks, context } = mix(env, track, audio);
-  const recorder = new (env('MediaRecorder'))(new (env('MediaStream'))(tracks), { mimeType });
+  const mixer = mix(env, track, audio);
+  let recorder;
   let timer;
   let finished = false;
   let queue = Promise.resolve();
@@ -234,46 +246,54 @@ function film({ env, stream, mic, track, type, duration, signal, progress }) {
     track.removeEventListener('ended', end);
     stopAll(stream);
     stopAll(mic);
-    context?.close();
+    mixer.close();
   };
-  return new ReadableStream({
-    start(controller) {
-      recorder.ondataavailable = (event) => {
-        const blob = event.data;
-        if (!blob?.size) return;
-        queue = queue.then(async () => {
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          if (!finished) controller.enqueue(bytes);
-        });
-      };
-      recorder.onstop = () =>
-        queue.then(() => {
-          if (finished) return;
-          finish();
-          controller.close();
-        });
-      recorder.onerror = (event) => {
+  const start = (controller) => {
+    recorder.ondataavailable = (event) => {
+      const blob = event.data;
+      if (!blob?.size) return;
+      queue = queue.then(async () => {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (!finished) controller.enqueue(bytes);
+      });
+    };
+    recorder.onstop = () =>
+      queue.then(() => {
         if (finished) return;
         finish();
-        controller.error(event.error ?? new Error('the recording failed'));
-      };
-      abort = () => {
-        end();
-        if (finished) return;
-        finish();
-        controller.error(aborted(signal));
-      };
-      signal.addEventListener('abort', abort, { once: true });
-      track.addEventListener('ended', end, { once: true });
-      if (duration) timer = setTimeout(end, duration * 1000);
-      recorder.start(250);
-      progress(duration ? `recording for ${duration} s…` : 'recording…');
-    },
-    cancel() {
-      end();
+        controller.close();
+      });
+    recorder.onerror = (event) => {
+      if (finished) return;
       finish();
-    },
-  });
+      controller.error(event.error ?? new Error('the recording failed'));
+    };
+    abort = () => {
+      end();
+      if (finished) return;
+      finish();
+      controller.error(aborted(signal));
+    };
+    recorder.start(250);
+    signal.addEventListener('abort', abort, { once: true });
+    track.addEventListener('ended', end, { once: true });
+    if (duration) timer = setTimeout(end, duration * 1000);
+    progress(duration ? `recording for ${duration} s…` : 'recording…');
+  };
+  try {
+    recorder = new (env('MediaRecorder'))(new (env('MediaStream'))(mixer.tracks), { mimeType });
+    return new ReadableStream({
+      start,
+      cancel() {
+        end();
+        finish();
+      },
+    });
+  } catch (error) {
+    finished = true;
+    mixer.close();
+    throw error;
+  }
 }
 
 export function create(overrides = {}) {

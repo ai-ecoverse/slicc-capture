@@ -446,6 +446,7 @@ function studio(overrides = {}) {
     }
 
     constructor(stream, options) {
+      tape.open?.();
       this.stream = stream;
       this.options = options;
       this.state = 'inactive';
@@ -454,8 +455,8 @@ function studio(overrides = {}) {
 
     start(slice) {
       this.slice = slice;
-      this.state = 'recording';
       tape.start(this);
+      this.state = 'recording';
     }
 
     stop() {
@@ -486,6 +487,7 @@ function studio(overrides = {}) {
     }
 
     createMediaStreamSource(stream) {
+      tape.source?.();
       return { connect: (to) => this.sources.push([stream.tracks, to]) };
     }
 
@@ -687,6 +689,55 @@ describe('the page module recording', () => {
     state.tape.start = (recorder) => setTimeout(() => recorder.onerror({}), 50);
     result = await sh('screencapture -v v.webm');
     assert.match(result.stderr, /screencapture: the recording failed\n$/);
+  });
+
+  it('closes the mixer and stops every track when the recording fails to start', async () => {
+    const cases = [
+      [
+        (tape) => {
+          tape.start = () => {
+            throw refusal('SecurityError', 'the stream cannot be recorded');
+          };
+        },
+        'the stream cannot be recorded',
+        1,
+      ],
+      [
+        (tape) => {
+          tape.open = () => {
+            throw refusal('NotSupportedError', 'the type cannot be recorded');
+          };
+        },
+        'the type cannot be recorded',
+        1,
+      ],
+      [
+        (tape) => {
+          tape.source = () => {
+            throw refusal('NotSupportedError', 'the sample rates differ');
+          };
+        },
+        'the sample rates differ',
+        0,
+      ],
+    ];
+    for (const [arrange, message, mixed] of cases) {
+      const state = studio();
+      arrange(state.tape);
+      const result = await sh(
+        'rm -f v.webm; screencapture -v -A -g v.webm; echo "$?"; test -e v.webm || echo none'
+      );
+      assert.deepEqual(
+        result,
+        { status: 0, stdout: '1\nnone\n', stderr: `${picker}screencapture: ${message}\n` },
+        message
+      );
+      const [context] = state.tape.contexts;
+      assert.equal(context.closed, 1, message);
+      assert.equal(context.mixed.stops, mixed, message);
+      assert.deepEqual(stopped(state), [1, 1], message);
+      assert.equal(state.tape.mic.tracks[0].stops, 1, message);
+    }
   });
 
   it('refuses a type this browser cannot record, before the picker', async () => {
