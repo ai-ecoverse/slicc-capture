@@ -191,10 +191,10 @@ function mix(env, track, audio) {
   };
   try {
     const destination = context.createMediaStreamDestination();
+    mixed = destination.stream.getAudioTracks();
     const Stream = env('MediaStream');
     for (const one of audio)
       context.createMediaStreamSource(new Stream([one])).connect(destination);
-    mixed = destination.stream.getAudioTracks();
     return { tracks: [track, ...mixed], close };
   } catch (error) {
     close();

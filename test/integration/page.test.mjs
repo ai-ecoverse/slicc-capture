@@ -718,7 +718,7 @@ describe('the page module recording', () => {
           };
         },
         'the sample rates differ',
-        0,
+        1,
       ],
     ];
     for (const [arrange, message, mixed] of cases) {
