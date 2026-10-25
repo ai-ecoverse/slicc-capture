@@ -67,7 +67,7 @@ const checks = {
 function parse(options = {}) {
   const { type = 'image/png', quality, cursor, surface, delay, rect } = options;
   const { duration, system, microphone } = options;
-  const video = type in movies;
+  const video = Object.hasOwn(movies, type);
   if (!types.includes(type) && !video) {
     throw fail('NotSupportedError', `unsupported type: ${type}`);
   }

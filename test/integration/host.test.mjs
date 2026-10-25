@@ -1083,6 +1083,10 @@ describe('videos on Linux', posix, () => {
         ['-y', '-c', 'libvpx-vp9'],
       ],
       [
+        ['-v', '-g', '@f.webm'],
+        ['-y', '-a', '-c', 'libvpx-vp9', '-C', 'libopus'],
+      ],
+      [
         ['-v', '-t', 'webm', '@f'],
         ['-y', '-m', 'webm', '-c', 'libvpx-vp9'],
       ],

@@ -733,6 +733,13 @@ describe('the page module recording', () => {
       }),
       { name: 'NotSupportedError', message: 'rect: not with video' }
     );
+    for (const type of ['toString', 'constructor', '__proto__']) {
+      await assert.rejects(
+        state.page.handle({ options: { type }, display }),
+        { name: 'NotSupportedError', message: `unsupported type: ${type}` },
+        type
+      );
+    }
     assert.deepEqual(state.constraints, []);
   });
 

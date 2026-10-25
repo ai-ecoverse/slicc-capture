@@ -578,7 +578,6 @@ describe('videos on the kernel', () => {
     const cases = [
       ['-v x.webm', { type: 'video/webm' }],
       ['-v x', { type: 'video/webm' }],
-      ['-v x.png', { type: 'video/webm' }],
       ['-v x.MKV', { type: 'video/webm' }],
       ['-v x.mp4', { type: 'video/mp4' }],
       ['-v x.m4v', { type: 'video/mp4' }],
@@ -610,6 +609,14 @@ describe('videos on the kernel', () => {
       ['-G x f.png', '-G: needs -v'],
       ['-A -g f.png', '-A: needs -v'],
       ['-v -c', '-c: not with -v'],
+      [
+        '-v shot.png',
+        '-v: shot.png is an image: record to a .webm or .mp4, or use -P to show a capture inline',
+      ],
+      [
+        '-V 2 a.b/x.JPG',
+        '-v: a.b/x.JPG is an image: record to a .webm or .mp4, or use -P to show a capture inline',
+      ],
       ['-v -P f.webm', '-P: not with -v in SLICC'],
       ['-v -R 0,0,5,5 f.webm', '-R: not with -v in SLICC'],
       ['-v -t gif f.webm', '-t gif: not supported in SLICC'],

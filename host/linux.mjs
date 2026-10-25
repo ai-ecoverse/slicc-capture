@@ -44,6 +44,7 @@ const recorders = {
     const { type, muxer } = container(o, file);
     if (muxer) args.push('-m', muxer);
     if (type === 'webm') args.push('-c', 'libvpx-vp9');
+    if (type === 'webm' && (o.microphone || o.system)) args.push('-C', 'libopus');
     args.push('-f', file);
     return { args, slurp: o.select && !o.rect, stop: 'SIGINT' };
   },

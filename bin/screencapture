@@ -351,6 +351,9 @@ elif [ -n "$type" ]; then
   mime=$($kind "$type")
   [ -n "$mime" ] || refuse "-t $type: not supported in SLICC"
 else
+  case $file in
+    *.*) [ -z "$video" ] || [ -z "$(format "${file##*.}")" ] || refuse "-v: $file is an image: record to a .webm or .mp4, or use -P to show a capture inline" ;;
+  esac
   mime=$($kind "${file##*.}")
   case $file in
     *.*) ;;
