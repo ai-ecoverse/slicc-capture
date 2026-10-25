@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import {
   chmodSync,
   closeSync,
@@ -21,15 +22,31 @@ import { fakeExe } from './fake-windows.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'slicc-capture-host-')));
-const usage =
-  'usage: sccapture [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n';
+const usages = {
+  darwin:
+    'usage: sccapture [-abcdgikmoprsuvwxACMPSUW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [-l windowid] [-B bundleid] [-V seconds] [-G id] [file ... | -]\n',
+  linux:
+    'usage: sccapture [-acdgiorsvwxACPW] [-t format] [-T seconds] [-R x,y,w,h] [-J style] [-l windowid] [-V seconds] [-G id] [file | -]\n',
+  win32:
+    'usage: sccapture [-acdmorvxCP] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-V seconds] [-G id] [file | -]\n',
+};
+const usage = usages.linux;
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
 const onWindows = process.platform === 'win32';
 const posix = { skip: onWindows && 'needs POSIX fakes' };
 
 after(() => rmSync(scratch, { recursive: true, force: true, maxRetries: 20 }));
 
-const shooters = ['screencapture', 'grim', 'gnome-screenshot', 'import', 'scrot'];
+const shooters = [
+  'screencapture',
+  'grim',
+  'gnome-screenshot',
+  'import',
+  'scrot',
+  'wf-recorder',
+  'ffmpeg',
+  'ffmpeg.exe',
+];
 
 function fake(name) {
   return `#!${process.execPath}
@@ -56,11 +73,21 @@ if (fail !== undefined) {
   process.exit(3);
 }
 if (name === 'slurp') process.stdout.write('10,20 30x40\\n');
-if (${JSON.stringify(shooters)}.includes(name) && argv.length && path.isAbsolute(argv.at(-1).replace(/^[a-z]+:/, ''))) {
+if (!process.env.FAKE_EMPTY && ${JSON.stringify(shooters)}.includes(name) && argv.length && path.isAbsolute(argv.at(-1).replace(/^[a-z]+:/, ''))) {
   fs.writeFileSync(argv.at(-1).replace(/^[a-z]+:/, ''), 'image by ' + name);
 }
 if (process.env.SCCAPTURE_FILE) fs.writeFileSync(process.env.SCCAPTURE_FILE, 'image by ' + name);
 if (process.env.FAKE_INSTALLED && argv.includes('-File')) process.stdout.write('sccapture ' + process.env.FAKE_INSTALLED + ' installed to x\\n');
+if (process.env.FAKE_HOLD === name) {
+  const done = (how) => {
+    fs.appendFileSync(path.join(process.env.FAKE_LOG, 'calls'), JSON.stringify({ name, stopped: how }) + '\\n');
+    process.exit(Number(process.env.FAKE_STOPPED ?? 0));
+  };
+  if (argv.includes('-hide_banner')) done(fs.readFileSync(0, 'utf8'));
+  process.on('SIGINT', () => done('SIGINT'));
+  fs.writeFileSync(path.join(process.env.FAKE_LOG, 'ready'), '');
+  setInterval(() => {}, 1000);
+}
 `;
 }
 
@@ -100,6 +127,10 @@ async function capture({
   entry,
   timeout,
   path = (dir) => dir,
+  signals = new EventEmitter(),
+  tty,
+  pause = 0,
+  during,
 }) {
   const dir = bin(names);
   const log = mkdtempSync(join(scratch, 'log-'));
@@ -117,12 +148,15 @@ async function capture({
   const wait = async (seconds) => {
     waited.push(seconds);
     writeFileSync(join(log, 'calls'), '', { flag: 'a' });
+    if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
   };
   const files = (name) => join(log, name);
   const args = argv.map((arg) => arg.replace(/^@/, `${log}${sep}`));
   let code;
   try {
-    code = await run({ argv: args, env, platform, fds, wait, entry, timeout });
+    const running = run({ argv: args, env, platform, fds, wait, entry, timeout, signals, tty });
+    if (during) await during({ log, signals });
+    code = await running;
   } finally {
     for (const fd of fds) closeSync(fd);
   }
@@ -145,15 +179,51 @@ function decoded(argv) {
 
 describe('the options', () => {
   for (const platform of ['darwin', 'linux', 'win32']) {
-    it(`prints the usage for -h or --help anywhere on ${platform}`, async () => {
+    it(`prints the help for -h or --help anywhere on ${platform}`, async () => {
+      const first = await capture({ platform, argv: ['-h'] });
       for (const argv of [['-h'], ['--help'], ['-xh'], ['-Z', 'f', '-h'], ['--version', '-h']]) {
         const result = await capture({ platform, argv });
         assert.deepEqual(
           [result.code, result.stdout, result.stderr],
-          [0, usage, ''],
+          [0, first.stdout, ''],
           argv.join(' ')
         );
         assert.deepEqual(result.calls, []);
+      }
+      assert.ok(first.stdout.startsWith(`${usages[platform]}\nCaptures the screen with `));
+      for (const row of ['--version', '--upgrade', '-h, --help', '-c, --clipboard']) {
+        assert.match(first.stdout, new RegExp(`^  ${row} +\\S`, 'm'), row);
+      }
+    });
+
+    it(`lists in the usage and the help exactly the options it takes on ${platform}`, async () => {
+      const { stdout } = await capture({ platform, argv: ['--help'] });
+      const line = usages[platform];
+      const all = 'aAbBcCdDgGiJklmMoprPRsStTuUvVwWx';
+      const values = {
+        B: 'x',
+        D: '1',
+        G: '1',
+        J: 'window',
+        l: '1',
+        R: '0,0,1,1',
+        t: 'png',
+        T: '0',
+        V: '1',
+      };
+      for (const letter of all) {
+        const argv = values[letter] ? [`-${letter}`, values[letter], '-c'] : [`-${letter}`, '-c'];
+        const result = await capture({ platform, names: [], argv });
+        const refused = result.stderr.includes(`-${letter}: not supported on`);
+        const listed = values[letter]
+          ? line.includes(`[-${letter} `)
+          : new RegExp(`\\[-[a-zA-Z]*${letter}[a-zA-Z]*\\]`).test(line);
+        const described =
+          new RegExp(`^  -${letter}[ ,]`, 'm').test(stdout) ||
+          stdout.includes(`-${letter}, `) ||
+          stdout.includes(`-${letter}: accepted`);
+        assert.equal(listed, !refused, `-${letter} in the usage`);
+        assert.equal(described, !refused, `-${letter} in the help`);
       }
     });
   }
@@ -217,7 +287,7 @@ describe('the options', () => {
       });
       assert.deepEqual(
         [result.code, result.stderr],
-        [2, `sccapture: output file required (or use -c for clipboard)\n${usage}`]
+        [2, `sccapture: output file required (or use -c for clipboard)\n${usages[platform]}`]
       );
       assert.deepEqual(result.calls, []);
     }
@@ -344,22 +414,81 @@ describe('macOS', posix, () => {
     }
   });
 
-  it('refuses the video options', async () => {
-    for (const [argv, label] of [
-      [['-v'], '-v'],
-      [['--view'], '--view'],
-      [['-V', '5'], '-V'],
-      [['-g'], '-g'],
-      [['-G', '1'], '-G'],
-      [['-k'], '-k'],
+  it('passes the video options, adding -v for -V', async () => {
+    for (const [argv, expected] of [
+      [
+        ['-v', '@f.mov'],
+        ['-v', '@f.mov'],
+      ],
+      [
+        ['-V', '5', '@f.mov'],
+        ['-v', '-V', '5', '@f.mov'],
+      ],
+      [
+        ['-v', '-V5', '@f.mov'],
+        ['-v', '-V5', '@f.mov'],
+      ],
+      [
+        ['-vgkA', '-G', '1', '@f.mov'],
+        ['-vgkA', '-G', '1', '@f.mov'],
+      ],
+      [
+        ['-J', 'video', '@f.mov'],
+        ['-J', 'video', '@f.mov'],
+      ],
+      [
+        ['-v', '-t', 'jpg', '@f.jpg'],
+        ['-v', '-t', 'jpg', '@f.jpg'],
+      ],
+      [
+        ['--view', '@f.png'],
+        ['-P', '@f.png'],
+      ],
     ]) {
-      const result = await mac([...argv, '@f']);
+      const result = await mac(argv);
+      assert.equal(result.code, 0, `${argv.join(' ')}: ${result.stderr}`);
       assert.deepEqual(
-        [result.code, result.stderr],
-        [2, `sccapture: ${label}: not supported on macOS\n`]
+        result.calls[0].argv,
+        expected.map((arg) => arg.replace('@', `${result.log}/`)),
+        argv.join(' ')
       );
-      assert.deepEqual(result.calls, []);
     }
+  });
+
+  it('stops screencapture -v on a signal, and keeps the movie', async () => {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      const result = await capture({
+        platform: 'darwin',
+        names: ['screencapture'],
+        argv: ['-v', '@f.mov'],
+        extra: { FAKE_HOLD: 'screencapture', FAKE_STOPPED: '1' },
+        during: async ({ log, signals }) => {
+          while (!existsSync(join(log, 'ready'))) await new Promise((r) => setTimeout(r, 20));
+          signals.emit(signal);
+        },
+      });
+      assert.deepEqual([result.code, result.stderr], [0, ''], signal);
+      assert.deepEqual(result.calls[1], { name: 'screencapture', stopped: 'SIGINT' }, signal);
+      assert.equal(result.read('f.mov'), 'image by screencapture');
+    }
+  });
+
+  it('fails when screencapture -v fails, or stops without a movie', async () => {
+    const failed = await mac(['-v', '@f.mov'], { FAKE_FAIL: 'screencapture:no permission' });
+    assert.deepEqual([failed.code, failed.stderr], [1, 'no permission\n']);
+    const quiet = await mac(['-v', '@f.mov'], { FAKE_FAIL: 'screencapture:' });
+    assert.deepEqual([quiet.code, quiet.stderr], [1, 'sccapture: screencapture failed\n']);
+    const empty = await capture({
+      platform: 'darwin',
+      names: ['screencapture'],
+      argv: ['-v', '@f.mov'],
+      extra: { FAKE_HOLD: 'screencapture', FAKE_STOPPED: '1', FAKE_EMPTY: '1' },
+      during: async ({ log, signals }) => {
+        while (!existsSync(join(log, 'ready'))) await new Promise((r) => setTimeout(r, 20));
+        signals.emit('SIGINT');
+      },
+    });
+    assert.deepEqual([empty.code, empty.stderr], [1, 'sccapture: screencapture failed\n']);
   });
 
   it('passes on screencapture failing, and says when it is missing', async () => {
@@ -587,8 +716,6 @@ describe('Linux', posix, () => {
       [['-b'], '-b'],
       [['-B', 'x'], '-B'],
       [['-D', '1'], '-D'],
-      [['-g'], '-g'],
-      [['-G', '1'], '-G'],
       [['-k'], '-k'],
       [['-m'], '-m'],
       [['-M'], '-M'],
@@ -596,11 +723,9 @@ describe('Linux', posix, () => {
       [['-S'], '-S'],
       [['-u'], '-u'],
       [['-U'], '-U'],
-      [['-v'], '-v'],
-      [['--view'], '--view'],
-      [['-V', '1'], '-V'],
-      [['-J', 'video'], '-J video'],
       [['-t', 'webp'], '-t webp'],
+      [['-v', '-t', 'png'], '-t png'],
+      [['-v', '-t', 'gif'], '-t gif'],
       [['-t', 'gif'], '-t gif'],
     ]) {
       const result = await linux(['scrot'], [...argv, '@f']);
@@ -795,10 +920,10 @@ describe('Windows', () => {
 
   it('refuses the unsupported options', async () => {
     for (const [argv, label] of [
+      [['-A'], '-A'],
       [['-b'], '-b'],
       [['-B', 'x'], '-B'],
       [['-g'], '-g'],
-      [['-G', '1'], '-G'],
       [['-i'], '-i'],
       [['-J', 'window'], '-J'],
       [['-k'], '-k'],
@@ -809,8 +934,6 @@ describe('Windows', () => {
       [['-S'], '-S'],
       [['-u'], '-u'],
       [['-U'], '-U'],
-      [['-v'], '-v'],
-      [['-V', '1'], '-V'],
       [['-w'], '-w'],
       [['-W'], '-W'],
       [['-t', 'webp'], '-t webp'],
@@ -839,6 +962,402 @@ describe('Windows', () => {
     assert.deepEqual(
       [none.code, none.stderr],
       [1, 'sccapture: no screenshot tool found (tried powershell.exe, pwsh.exe)\n']
+    );
+  });
+});
+
+const ready = async ({ log, signals }, signal = 'SIGINT') => {
+  while (!existsSync(join(log, 'ready'))) await new Promise((r) => setTimeout(r, 20));
+  signals.emit(signal);
+};
+
+const head = ['-hide_banner', '-loglevel', 'error', '-nostats', '-y'];
+const tail = ['-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p'];
+
+describe('videos on Linux', posix, () => {
+  const film = (names, argv, extra, more) =>
+    capture({ platform: 'linux', names, argv, extra: { DISPLAY: '', ...extra }, ...more });
+
+  it('records with ffmpeg under X11, as the table says', async () => {
+    const x = (...args) => ['-f', 'x11grab', ...args];
+    for (const [argv, expected, extra] of [
+      [
+        ['-v', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-i', ':0'), ...tail],
+      ],
+      [['-v', '@f.mp4'], [...x('-draw_mouse', '0', '-i', ':1.0'), ...tail], { DISPLAY: ':1.0' }],
+      [
+        ['-V', '2.5', '-C', '@f.mkv'],
+        [...x('-draw_mouse', '1', '-i', ':0'), '-t', '2.5', ...tail],
+      ],
+      [
+        ['-v', '-R', '10,20,300,200', '@f.webm'],
+        [...x('-draw_mouse', '0', '-video_size', '300x200', '-i', ':0+10,20'), ...tail],
+      ],
+      [
+        ['-v', '-s', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-select_region', '1', '-i', ':0'), ...tail],
+      ],
+      [
+        ['-J', 'video', '-i', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-select_region', '1', '-i', ':0'), ...tail],
+      ],
+      [
+        ['-v', '-l', '0x2a', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-window_id', '0x2a', '-i', ':0'), ...tail],
+      ],
+      [
+        ['-v', '-g', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-i', ':0'), '-f', 'pulse', '-i', 'default', ...tail],
+      ],
+      [
+        ['-v', '-G', 'alsa_input.usb', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-i', ':0'), '-f', 'pulse', '-i', 'alsa_input.usb', ...tail],
+      ],
+      [
+        ['-v', '-A', '-g', '@f.mp4'],
+        [
+          ...x('-draw_mouse', '0', '-i', ':0'),
+          '-f',
+          'pulse',
+          '-i',
+          'default',
+          '-f',
+          'pulse',
+          '-i',
+          '@DEFAULT_MONITOR@',
+          '-filter_complex',
+          '[1:a][2:a]amix=inputs=2[a]',
+          '-map',
+          '0:v',
+          '-map',
+          '[a]',
+          ...tail,
+        ],
+      ],
+      [
+        ['-v', '-t', 'mkv', '@f.mp4'],
+        [...x('-draw_mouse', '0', '-i', ':0'), ...tail, '-f', 'matroska'],
+      ],
+      [
+        ['-v', '@f'],
+        [...x('-draw_mouse', '0', '-i', ':0'), ...tail, '-f', 'mp4'],
+      ],
+      [
+        ['-v', '@f.avi'],
+        [...x('-draw_mouse', '0', '-i', ':0'), ...tail],
+      ],
+    ]) {
+      const result = await film(['ffmpeg', 'wf-recorder'], argv, extra);
+      assert.equal(result.code, 0, `${argv.join(' ')}: ${result.stderr}`);
+      const file = argv.at(-1).replace('@', `${result.log}/`);
+      assert.deepEqual(
+        result.calls[0],
+        { name: 'ffmpeg', argv: [...head, ...expected, file] },
+        argv.join(' ')
+      );
+    }
+  });
+
+  it('records with wf-recorder under Wayland, as the table says', async () => {
+    for (const [argv, expected] of [
+      [['-v', '@f.mp4'], ['-y']],
+      [
+        ['-v', '-R', '1,2,3,4', '@f.mp4'],
+        ['-y', '-g', '1,2 3x4'],
+      ],
+      [
+        ['-v', '-g', '@f.mp4'],
+        ['-y', '-a'],
+      ],
+      [
+        ['-v', '-G', 'mic', '@f.mp4'],
+        ['-y', '--audio=mic'],
+      ],
+      [
+        ['-v', '-A', '@f.mp4'],
+        ['-y', '--audio=@DEFAULT_MONITOR@'],
+      ],
+      [
+        ['-v', '@f.webm'],
+        ['-y', '-c', 'libvpx-vp9'],
+      ],
+      [
+        ['-v', '-g', '@f.webm'],
+        ['-y', '-a', '-c', 'libvpx-vp9', '-C', 'libopus'],
+      ],
+      [
+        ['-v', '-t', 'webm', '@f'],
+        ['-y', '-m', 'webm', '-c', 'libvpx-vp9'],
+      ],
+      [
+        ['-v', '@f'],
+        ['-y', '-m', 'mp4'],
+      ],
+    ]) {
+      const result = await film(['wf-recorder', 'ffmpeg'], argv, wayland);
+      assert.equal(result.code, 0, `${argv.join(' ')}: ${result.stderr}`);
+      const file = argv.at(-1).replace('@', `${result.log}/`);
+      assert.deepEqual(
+        result.calls[0],
+        { name: 'wf-recorder', argv: [...expected, '-f', file] },
+        argv.join(' ')
+      );
+    }
+  });
+
+  it('selects a region with slurp for wf-recorder', async () => {
+    const result = await film(['wf-recorder', 'slurp'], ['-v', '-s', '@f.mp4'], wayland);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(
+      result.calls.map((call) => call.name),
+      ['slurp', 'wf-recorder']
+    );
+    assert.deepEqual(result.calls[1].argv, [
+      '-g',
+      '10,20 30x40',
+      '-y',
+      '-f',
+      `${result.log}/f.mp4`,
+    ]);
+  });
+
+  it('stops ffmpeg with q and wf-recorder with SIGINT, on a signal or after -V', async () => {
+    const ff = await film(
+      ['ffmpeg'],
+      ['-v', '@f.mp4'],
+      { FAKE_HOLD: 'ffmpeg' },
+      {
+        during: async ({ log, signals }) => {
+          while (!existsSync(join(log, 'calls'))) await new Promise((r) => setTimeout(r, 20));
+          await new Promise((r) => setTimeout(r, 200));
+          signals.emit('SIGTERM');
+          signals.emit('SIGINT');
+        },
+      }
+    );
+    assert.deepEqual([ff.code, ff.stderr], [0, '']);
+    assert.deepEqual(ff.calls[1], { name: 'ffmpeg', stopped: 'q' });
+    const wf = await film(
+      ['wf-recorder'],
+      ['-v', '@f.mp4'],
+      { ...wayland, FAKE_HOLD: 'wf-recorder' },
+      {
+        during: (context) => ready(context, 'SIGHUP'),
+      }
+    );
+    assert.deepEqual([wf.code, wf.stderr], [0, '']);
+    assert.deepEqual(wf.calls[1], { name: 'wf-recorder', stopped: 'SIGINT' });
+    const timed = await film(
+      ['wf-recorder'],
+      ['-V', '3', '@f.mp4'],
+      { ...wayland, FAKE_HOLD: 'wf-recorder', FAKE_STOPPED: '130' },
+      { pause: 500 }
+    );
+    assert.deepEqual([timed.code, timed.stderr, timed.waited], [0, '', [0, 3]]);
+    assert.deepEqual(timed.calls.at(-1), { name: 'wf-recorder', stopped: 'SIGINT' });
+  });
+
+  it('refuses what the recorders cannot do, and says when none is there', async () => {
+    for (const [names, argv, extra, message] of [
+      [['ffmpeg'], ['-v', '-w', '@f'], {}, '-w: not supported with ffmpeg'],
+      [['ffmpeg'], ['-J', 'window', '-v', '@f'], {}, '-J window: not supported with ffmpeg'],
+      [['wf-recorder'], ['-v', '-W', '@f'], wayland, '-W: not supported with wf-recorder'],
+      [['wf-recorder'], ['-v', '-l', '1', '@f'], wayland, '-l: not supported with wf-recorder'],
+      [['wf-recorder'], ['-v', '-C', '@f'], wayland, '-C: not supported with wf-recorder'],
+      [['wf-recorder'], ['-v', '-A', '-g', '@f'], wayland, '-A: not supported with wf-recorder'],
+    ]) {
+      const result = await film(names, argv, extra);
+      assert.deepEqual([result.code, result.stderr], [2, `sccapture: ${message}\n`], message);
+      assert.deepEqual(result.calls, []);
+    }
+    const none = await film(['ffmpeg'], ['-v', '@f'], wayland);
+    assert.deepEqual(
+      [none.code, none.stderr],
+      [1, 'sccapture: no screen recorder found (tried wf-recorder)\n']
+    );
+    const x = await film([], ['-v', '@f']);
+    assert.deepEqual(
+      [x.code, x.stderr],
+      [1, 'sccapture: no screen recorder found (tried ffmpeg)\n']
+    );
+    const failed = await film(['ffmpeg'], ['-V', '1', '@f'], {
+      FAKE_FAIL: 'ffmpeg:Cannot open display',
+    });
+    assert.deepEqual([failed.code, failed.stderr], [1, 'Cannot open display\n']);
+  });
+
+  it('needs -v for the audio options, and refuses -c with it', async () => {
+    for (const [argv, message] of [
+      [['-g', '@f'], '-g: needs -v'],
+      [['-G', 'x', '@f'], '-G: needs -v'],
+      [['-A', '@f'], '-A: needs -v'],
+      [['-v', '-c'], '-c: not with -v'],
+      [['-v', '--clipboard'], '--clipboard: not with -v'],
+      [['-V', '0', '@f'], '-V: invalid duration: 0'],
+      [['-V', 'x', '@f'], '-V: invalid duration: x'],
+      [['-v', '-G', ' ', '@f'], '-G: invalid audio input:  '],
+    ]) {
+      const result = await film(['ffmpeg'], argv);
+      assert.deepEqual([result.code, result.stderr], [2, `sccapture: ${message}\n`], message);
+    }
+  });
+
+  it('opens the movie with xdg-open for -P', async () => {
+    const result = await film(['ffmpeg', 'xdg-open'], ['-V', '1', '-P', '@f.mp4']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(
+      result.calls.map((call) => call.name),
+      ['ffmpeg', 'xdg-open']
+    );
+  });
+});
+
+describe('videos on Windows', () => {
+  const film = (names, argv, extra) => capture({ platform: 'win32', names, argv, extra });
+  const grab = (...args) => ['-f', 'gdigrab', ...args];
+
+  it('records with ffmpeg.exe and gdigrab, as the table says', async () => {
+    for (const [argv, expected] of [
+      [
+        ['-v', '@f.mp4'],
+        [...grab('-draw_mouse', '0', '-i', 'desktop'), ...tail],
+      ],
+      [
+        ['-V', '4', '-C', '@f.mp4'],
+        [...grab('-draw_mouse', '1', '-i', 'desktop'), '-t', '4', ...tail],
+      ],
+      [
+        ['-v', '-R', '5,6,70,80', '@f.mkv'],
+        [
+          ...grab(
+            '-draw_mouse',
+            '0',
+            '-offset_x',
+            '5',
+            '-offset_y',
+            '6',
+            '-video_size',
+            '70x80',
+            '-i',
+            'desktop'
+          ),
+          ...tail,
+        ],
+      ],
+      [
+        ['-v', '-G', 'Microphone (USB)', '@f.mp4'],
+        [
+          ...grab('-draw_mouse', '0', '-i', 'desktop'),
+          '-f',
+          'dshow',
+          '-i',
+          'audio=Microphone (USB)',
+          ...tail,
+        ],
+      ],
+      [
+        ['-v', '-t', 'mov', '@f'],
+        [...grab('-draw_mouse', '0', '-i', 'desktop'), ...tail, '-f', 'mov'],
+      ],
+    ]) {
+      const result = await film(['ffmpeg.exe'], argv);
+      assert.equal(result.code, 0, `${argv.join(' ')}: ${result.stderr}`);
+      const file = resolve(argv.at(-1).replace('@', `${result.log}${sep}`));
+      assert.deepEqual(result.calls[0].name, 'ffmpeg.exe');
+      assert.deepEqual(result.calls[0].argv, [...head, ...expected, file], argv.join(' '));
+    }
+  });
+
+  it('refuses -m and -D with -v, and says when ffmpeg.exe is missing', async () => {
+    for (const [argv, message] of [
+      [['-v', '-m', '@f'], '-m: not supported with ffmpeg.exe'],
+      [['-v', '-D', '2', '@f'], '-D: not supported with ffmpeg.exe'],
+    ]) {
+      const result = await film(['ffmpeg.exe'], argv);
+      assert.deepEqual([result.code, result.stderr], [2, `sccapture: ${message}\n`]);
+      assert.deepEqual(result.calls, []);
+    }
+    const none = await film(['powershell.exe'], ['-v', '@f']);
+    assert.deepEqual(
+      [none.code, none.stderr],
+      [1, 'sccapture: no screen recorder found (tried ffmpeg.exe)\n']
+    );
+  });
+
+  it('opens the movie with Invoke-Item for -P, with the file as data', async () => {
+    const result = await film(['ffmpeg.exe', 'pwsh.exe'], ['-V', '1', '-P', '@f.mp4']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(
+      result.calls.map((call) => call.name),
+      ['ffmpeg.exe', 'pwsh.exe']
+    );
+    assert.equal(decoded(result.calls[1].argv), 'Invoke-Item -LiteralPath $env:SCCAPTURE_FILE');
+    assert.equal(result.calls[1].env.SCCAPTURE_FILE, resolve(`${result.log}${sep}f.mp4`));
+    const none = await film(['ffmpeg.exe'], ['-V', '1', '-P', '@f.mp4']);
+    assert.deepEqual(
+      [none.code, none.stderr],
+      [1, 'sccapture: no viewer found (tried powershell.exe, pwsh.exe)\n']
+    );
+  });
+});
+
+describe('standard output on a host', posix, () => {
+  it('writes the capture to standard output for -, and leaves no file', async () => {
+    for (const [platform, names, argv, extra, made] of [
+      ['linux', ['scrot'], ['-'], {}, 'capture.png'],
+      ['linux', ['scrot'], ['-t', 'jpg', '--', '-'], {}, 'capture.jpg'],
+      ['linux', ['ffmpeg'], ['-V', '1', '-'], {}, 'capture.mp4'],
+      ['linux', ['ffmpeg'], ['-V', '1', '-t', 'webm', '-'], {}, 'capture.webm'],
+      ['darwin', ['screencapture'], ['-x', '-'], {}, 'capture.png'],
+      ['darwin', ['screencapture'], ['-V', '1', '-'], {}, 'capture.mov'],
+    ]) {
+      const result = await capture({ platform, names, argv, extra });
+      const how = `${platform} ${argv.join(' ')}`;
+      assert.deepEqual([result.code, result.stderr], [0, ''], how);
+      assert.equal(result.stdout, `image by ${names[0]}`, how);
+      const file = result.calls[0].argv.at(-1).replace(/^[a-z]+:/, '');
+      assert.equal(file.split(/[\\/]/).at(-1), made, how);
+      assert.equal(existsSync(file), false, how);
+    }
+  });
+
+  it('refuses a terminal, -P and another file with -', async () => {
+    for (const [argv, tty, message] of [
+      [
+        ['-'],
+        () => true,
+        'refusing to write to a terminal: redirect standard output or name a file',
+      ],
+      [['-P', '-'], undefined, '-P: not with -'],
+      [['-', '@f'], undefined, '-: standard output takes no other file'],
+    ]) {
+      const result = await capture({ platform: 'darwin', names: ['screencapture'], argv, tty });
+      assert.deepEqual(
+        [result.code, result.stdout, result.stderr],
+        [2, '', `sccapture: ${message}\n`]
+      );
+      assert.deepEqual(result.calls, []);
+    }
+  });
+
+  it('fails when the tool fails or writes nothing', async () => {
+    const failed = await capture({
+      platform: 'linux',
+      names: ['scrot'],
+      argv: ['-'],
+      extra: { FAKE_FAIL: 'scrot:no display' },
+    });
+    assert.deepEqual([failed.code, failed.stdout, failed.stderr], [1, '', 'no display\n']);
+    const empty = await capture({
+      platform: 'linux',
+      names: ['scrot'],
+      argv: ['-'],
+      extra: { FAKE_EMPTY: '1' },
+    });
+    assert.deepEqual(
+      [empty.code, empty.stdout, empty.stderr],
+      [1, '', 'sccapture: nothing was captured\n']
     );
   });
 });

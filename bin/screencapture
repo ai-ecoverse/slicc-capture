@@ -2,7 +2,35 @@
 me=${0##*/}
 dev=/dev/embedder
 usage() {
-  printf 'usage: %s [-acdimorvwxCW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [file]\n' "$me"
+  printf 'usage: %s [-acdgimorvwxACPW] [-t format] [-T seconds] [-R x,y,w,h] [-D display] [-J style] [-V seconds] [-G id] [file | -]\n' "$me"
+}
+row() {
+  printf '  %-17s %s\n' "$1" "$2"
+}
+guide() {
+  usage
+  printf '\nCaptures a screen, window or tab that the user picks in the browser.\n\n'
+  row -A 'with -v, record the audio the user shares in the picker'
+  row '-c, --clipboard' 'copy a PNG to the clipboard instead of a file'
+  row -C 'ask the browser to include the cursor'
+  row '-D display' 'as -m: the user picks the screen'
+  row -g 'with -v, record the microphone too'
+  row '-G id' 'with -v, record that microphone (a deviceId) too'
+  row '-J style' 'window, as -W; video, as -v'
+  row -m 'prefer a screen in the picker'
+  row '-P, --view' 'show the capture inline in the tool result'
+  row '-R x,y,w,h' "crop to that rectangle, in the capture's pixels"
+  row '-t format' "png, jpg or webp; with -v webm or mp4; else the file's extension"
+  row '-T seconds' 'wait that long after the picker'
+  row -v 'record a video until stopped: ^C, a signal, or Stop sharing'
+  row '-V seconds' 'record a video for that long'
+  row -w 'prefer a window in the picker'
+  row -W 'as -w'
+  row --version 'print the version'
+  row --upgrade 'print the command that upgrades it'
+  row '-h, --help' 'print this help'
+  printf '\nA file named - is standard output, which must not be a terminal.\n'
+  printf '%s\n' "-a, -d, -i, -o, -r, -x: accepted, as macOS's screencapture takes them, and do nothing."
 }
 say() {
   printf '%s: %s\n' "$me" "$1" >&2
@@ -60,9 +88,15 @@ rect() {
 }
 format() {
   case $1 in
-    [pP][nN][gG]) printf png ;;
-    [jJ][pP][gG] | [jJ][pP][eE][gG]) printf jpeg ;;
-    [wW][eE][bB][pP]) printf webp ;;
+    [pP][nN][gG]) printf image/png ;;
+    [jJ][pP][gG] | [jJ][pP][eE][gG]) printf image/jpeg ;;
+    [wW][eE][bB][pP]) printf image/webp ;;
+  esac
+}
+movie() {
+  case $1 in
+    [wW][eE][bB][mM] | [mM][kK][vV]) printf video/webm ;;
+    [mM][pP]4 | [mM][oO][vV] | [mM]4[vV]) printf video/mp4 ;;
   esac
 }
 value() {
@@ -85,9 +119,25 @@ value() {
     J)
       case $2 in
         window) surface=window ;;
-        selection | video) style=${style:-"-J $2: not supported in SLICC"} ;;
+        video) video=-v ;;
+        selection) style=${style:-"-J $2: not supported in SLICC"} ;;
         *) first "-J: invalid style: $2" ;;
       esac
+      ;;
+    V)
+      case $2 in
+        *[1-9]*) delay "$2" || first "-V: invalid duration: $2" ;;
+        *) first "-V: invalid duration: $2" ;;
+      esac
+      length=$2
+      video=-v
+      ;;
+    G)
+      case $2 in
+        '' | *[!A-Za-z0-9+/=_.-]*) first "-G: invalid audio input: $2" ;;
+      esac
+      mic=$2
+      audio=${audio:--G}
       ;;
     t) type=$2 ;;
     *) off=${off:-"-$1"} ;;
@@ -97,7 +147,16 @@ flag() {
   case $1 in
     c) clip=1 ;;
     C) cursor=always ;;
-    v) view=1 ;;
+    v) video=-v ;;
+    P) view=1 ;;
+    g)
+      mic=${mic:-default}
+      audio=${audio:--g}
+      ;;
+    A)
+      system=1
+      audio=${audio:--A}
+      ;;
     m) surface=monitor ;;
     w | W) surface=window ;;
     a | d | i | o | r | x) ;;
@@ -153,6 +212,21 @@ stop() {
   say interrupted
   exit $((128 + $1))
 }
+halt() {
+  [ ! -s "$work/pid" ] || kill -TERM "$(cat "$work/pid")" 2>/dev/null
+  wait
+  halted=$1
+}
+refused() {
+  case $header in
+    "Not supported") die "browser APIs are unavailable in this environment" ;;
+  esac
+  case $errno in
+    "Permission denied") die "user cancelled, permission denied, or the surface is protected" ;;
+    "Not supported") die "${message:-screen capture is not supported in this browser}" ;;
+  esac
+  die "$(because)"
+}
 absolute() {
   case $1 in
     */*) dir=${1%/*} base=${1##*/} ;;
@@ -167,6 +241,12 @@ cleanup() {
 argc=$#
 clip=
 view=
+video=
+length=
+mic=
+system=
+audio=
+halted=
 cursor=never
 surface=
 wait=
@@ -214,7 +294,7 @@ while [ $# -gt 0 ]; do
             fi
             rest=
             ;;
-          [abcCdgikmMoprPsSuUvwWx]) flag "$letter" ;;
+          [aAbcCdgikmMoprPsSuUvwWx]) flag "$letter" ;;
           *)
             wrong=${wrong:-"unknown option: -$letter"}
             rest=
@@ -229,7 +309,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "$help" ]; then
-  usage
+  guide
   exit 0
 fi
 [ -z "$wrong" ] || bad "$wrong"
@@ -245,52 +325,83 @@ fi
 [ -z "$off" ] || refuse "$off: not supported in SLICC"
 [ -z "$problem" ] || refuse "$problem"
 [ -z "$style" ] || refuse "$style"
-mime=png
+[ -z "$audio" ] || [ -n "$video" ] || refuse "$audio: needs -v"
+if [ -n "$video" ]; then
+  [ -z "$clip" ] || refuse "-c: not with -v"
+  [ -z "$view" ] || refuse "-P: not with -v in SLICC"
+  [ -z "$area" ] || refuse "-R: not with -v in SLICC"
+fi
 if [ -n "$clip" ]; then
   file=
   files=0
-elif [ -n "$type" ]; then
-  mime=$(format "$type")
-  [ -n "$mime" ] || refuse "-t $type: not supported in SLICC"
-else
-  case $file in
-    *.[jJ][pP][gG] | *.[jJ][pP][eE][gG]) mime=jpeg ;;
-    *.[wW][eE][bB][pP]) mime=webp ;;
-  esac
 fi
 [ "$files" -le 1 ] || refuse "more than one file: not supported in SLICC"
 [ -n "$file" ] || [ -n "$clip" ] || [ -n "$view" ] || bad "output file required (or use -c for clipboard)"
+out=
+if [ "$file" = - ]; then
+  [ -z "$view" ] || refuse "-P: not with -"
+  [ ! -t 1 ] || refuse "refusing to write to a terminal: redirect standard output or name a file"
+  out=1
+fi
+kind=format
+[ -z "$video" ] || kind=movie
+if [ -n "$clip" ]; then
+  mime=image/png
+elif [ -n "$type" ]; then
+  mime=$($kind "$type")
+  [ -n "$mime" ] || refuse "-t $type: not supported in SLICC"
+else
+  case $file in
+    *.*) [ -z "$video" ] || [ -z "$(format "${file##*.}")" ] || refuse "-v: $file is an image: record to a .webm or .mp4, or use -P to show a capture inline" ;;
+  esac
+  mime=$($kind "${file##*.}")
+  case $file in
+    *.*) ;;
+    *) mime= ;;
+  esac
+  [ -n "$mime" ] || mime=image/png
+  [ -z "$video" ] || [ "$mime" != image/png ] || mime=video/webm
+fi
 [ -c "$dev" ] || die "$dev not available (needs slicc-kernel >= 1.153.0)"
-request="{\"kind\":\"capture.screen\",\"type\":\"image/$mime\""
-[ "$mime" = png ] || request="$request,\"quality\":0.92"
+request="{\"kind\":\"capture.screen\",\"type\":\"$mime\""
+case $mime in
+  image/jpeg | image/webp) request="$request,\"quality\":0.92" ;;
+esac
 request="$request,\"cursor\":\"$cursor\""
 [ -z "$surface" ] || request="$request,\"surface\":\"$surface\""
 [ -z "$wait" ] || request="$request,\"delay\":$(num "${wait%%.*}")${wait#"${wait%%.*}"}"
 [ -z "$area" ] || request="$request,\"rect\":{\"x\":$(num "$rx"),\"y\":$(num "$ry"),\"width\":$(num "$rw"),\"height\":$(num "$rh")}"
+[ -z "$length" ] || request="$request,\"duration\":$(num "${length%%.*}")${length#"${length%%.*}"}"
+[ -z "$system" ] || request="$request,\"system\":true"
+case $mic in
+  '') ;;
+  default) request="$request,\"microphone\":true" ;;
+  *) request="$request,\"microphone\":\"$mic\"" ;;
+esac
 request="$request}"
 work=$(mktemp -d 2>/dev/null) || die "failed to create a temporary directory in ${TMPDIR:-/tmp}"
 trap cleanup EXIT
-trap 'stop 1' HUP
-trap 'stop 2' INT
-trap 'stop 15' TERM
+if [ -n "$video" ]; then
+  trap 'halt 1' HUP
+  trap 'halt 2' INT
+  trap 'halt 15' TERM
+else
+  trap 'stop 1' HUP
+  trap 'stop 2' INT
+  trap 'stop 15' TERM
+fi
 if [ -n "$clip" ]; then
   exec 4<>"$dev"
   ask sh -c "printf '%s\\n' \"\$1\" >&4" sh '{"kind":"clipboard.write","type":"image/png"}' || copyfail
 fi
 exec 3<>"$dev"
-if ! ask sh -c "printf '%s\\n' \"\$1\" >&3 || exit 1; cat <&3 & echo \$! >\"\$2\"; wait \$!" sh "$request" "$work/pid" >"$work/image"; then
-  case $header in
-    "Not supported") die "browser APIs are unavailable in this environment" ;;
-  esac
-  case $errno in
-    "Permission denied") die "user cancelled, permission denied, or the surface is protected" ;;
-    "Not supported") die "${message:-screen capture is not supported in this browser}" ;;
-  esac
-  die "$(because)"
-fi
+ask sh -c "printf '%s\\n' \"\$1\" >&3 || exit 1; cat <&3 & echo \$! >\"\$2\"; wait \$!" sh "$request" "$work/pid" >"$work/image" || [ -n "$halted" ] || refused
+[ -z "$halted" ] || [ -s "$work/image" ] || stop "$halted"
 exec 3<&-
 size=$(wc -c <"$work/image")
-[ "$size" -gt 0 ] || die "the page sent no image"
+what=image
+[ -z "$video" ] || what=video
+[ "$size" -gt 0 ] || die "the page sent no $what"
 kb=$(((size + 512) / 1024))
 if [ -n "$clip" ]; then
   ask cat "$work/image" >&4 || copyfail
@@ -298,9 +409,13 @@ if [ -n "$clip" ]; then
   exec 4<&-
   printf 'captured %s KB to clipboard\n' "$kb"
 fi
+if [ -n "$out" ]; then
+  cat "$work/image" || die "failed to write to standard output"
+  exit 0
+fi
 if [ -z "$file" ]; then
   [ -n "$view" ] || exit 0
-  file=$(mktemp "${TMPDIR:-/tmp}/screencapture-XXXXXX.$mime" 2>/dev/null) || die "failed to create a temporary file in ${TMPDIR:-/tmp}"
+  file=$(mktemp "${TMPDIR:-/tmp}/screencapture-XXXXXX.${mime#image/}" 2>/dev/null) || die "failed to create a temporary file in ${TMPDIR:-/tmp}"
 fi
 err=$(tee -- "$file" <"$work/image" 2>&1 >/dev/null) || die "failed to write file: ${err#tee: }"
 if [ -n "$view" ]; then

@@ -54,6 +54,41 @@ async function capture({ options, fallback, abortAfter, outside }) {
   return result;
 }
 
+async function record({ type, duration }) {
+  const { create } = await import(new URL('/page/index.mjs', location.href).href);
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 120;
+  const context = canvas.getContext('2d');
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick += 1;
+    context.fillStyle = tick % 2 ? '#ff0000' : '#0000ff';
+    context.fillRect(0, 0, 160, 120);
+  }, 20);
+  const stream = canvas.captureStream(30);
+  const tracks = stream.getTracks();
+  const lines = [];
+  const result = { lines, supported: MediaRecorder.isTypeSupported(type) };
+  try {
+    const reply = await create().handle({
+      kind: 'capture.screen',
+      options: { type, duration },
+      progress: (line) => lines.push(line),
+      display: async () => stream,
+    });
+    const bytes = new Uint8Array(await new Response(reply).arrayBuffer());
+    result.size = bytes.length;
+    result.magic = Array.from(bytes.slice(0, 8));
+  } catch (error) {
+    result.error = { name: error.name, message: error.message };
+  } finally {
+    clearInterval(timer);
+  }
+  result.states = tracks.map((track) => track.readyState);
+  return result;
+}
+
 const red = (pixel) => pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60;
 const blue = (pixel) => pixel[0] < 60 && pixel[1] < 60 && pixel[2] > 200;
 
@@ -132,6 +167,30 @@ describe('the page module in Chrome', { skip }, () => {
       name: 'RangeError',
       message: '-R: rectangle outside the capture',
     });
+    assert.deepEqual(result.states, ['ended']);
+  });
+
+  it('records a WebM with MediaRecorder for the duration, and stops the track', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    const result = await tab.evaluate(record, { type: 'video/webm', duration: 0.6 });
+    assert.equal(result.error, undefined, JSON.stringify(result.error));
+    assert.deepEqual(result.magic.slice(0, 4), [0x1a, 0x45, 0xdf, 0xa3]);
+    assert.ok(result.size > 100, String(result.size));
+    assert.deepEqual(result.states, ['ended']);
+    assert.deepEqual(result.lines, ['waiting for the picker…', 'recording for 0.6 s…']);
+  });
+
+  it('records an MP4 where this Chrome can', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    const result = await tab.evaluate(record, { type: 'video/mp4', duration: 0.6 });
+    if (!result.supported) {
+      assert.equal(result.error?.name, 'NotSupportedError');
+      return;
+    }
+    assert.equal(result.error, undefined, JSON.stringify(result.error));
+    assert.deepEqual(result.magic.slice(4, 8), [0x66, 0x74, 0x79, 0x70]);
     assert.deepEqual(result.states, ['ended']);
   });
 
