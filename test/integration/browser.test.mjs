@@ -89,6 +89,76 @@ async function record({ type, duration }) {
   return result;
 }
 
+async function film({ options, audio }) {
+  const { create } = await import(new URL('/page/index.mjs', location.href).href);
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 120;
+  const context = canvas.getContext('2d');
+  const paint = () => {
+    context.fillStyle = '#ff0000';
+    context.fillRect(0, 0, 80, 120);
+    context.fillStyle = '#0000ff';
+    context.fillRect(80, 0, 80, 120);
+  };
+  paint();
+  const timer = setInterval(paint, 20);
+  const stream = canvas.captureStream(30);
+  let sound;
+  if (audio) {
+    sound = new AudioContext();
+    const oscillator = sound.createOscillator();
+    const destination = sound.createMediaStreamDestination();
+    oscillator.connect(destination);
+    oscillator.start();
+    await sound.resume();
+    stream.addTrack(destination.stream.getAudioTracks()[0]);
+  }
+  const tracks = stream.getTracks();
+  const lines = [];
+  const asked = [];
+  const result = { lines, asked };
+  try {
+    const reply = await create().handle({
+      kind: 'capture.camera',
+      options,
+      progress: (line) => lines.push(line),
+      userMedia: async (constraints) => {
+        asked.push(constraints);
+        return stream;
+      },
+    });
+    if (reply instanceof Uint8Array) {
+      const bitmap = await createImageBitmap(new Blob([reply], { type: options.type }));
+      const check = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const draw = check.getContext('2d');
+      draw.drawImage(bitmap, 0, 0);
+      result.magic = Array.from(reply.slice(0, 4));
+      result.size = [bitmap.width, bitmap.height];
+      result.left = Array.from(draw.getImageData(2, 2, 1, 1).data);
+      result.right = Array.from(draw.getImageData(bitmap.width - 3, 2, 1, 1).data);
+    } else {
+      const bytes = new Uint8Array(await new Response(reply).arrayBuffer());
+      result.bytes = bytes.length;
+      result.magic = Array.from(bytes.slice(0, 4));
+      const head = new TextDecoder('latin1').decode(bytes.slice(0, 4096));
+      result.codecs = head.match(/V_VP[89]|A_OPUS/g);
+    }
+  } catch (error) {
+    result.error = { name: error.name, message: error.message };
+  } finally {
+    clearInterval(timer);
+    await sound?.close();
+  }
+  result.states = tracks.map((track) => track.readyState);
+  return result;
+}
+
+async function devices() {
+  const { create } = await import(new URL('/page/index.mjs', location.href).href);
+  return create().handle({ kind: 'capture.devices', options: {} });
+}
+
 const red = (pixel) => pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60;
 const blue = (pixel) => pixel[0] < 60 && pixel[1] < 60 && pixel[2] > 200;
 
@@ -192,6 +262,50 @@ describe('the page module in Chrome', { skip }, () => {
     assert.equal(result.error, undefined, JSON.stringify(result.error));
     assert.deepEqual(result.magic.slice(4, 8), [0x66, 0x74, 0x79, 0x70]);
     assert.deepEqual(result.states, ['ended']);
+  });
+
+  it('takes a camera still after the warmup, and stops the camera', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    const result = await tab.evaluate(film, {
+      options: { type: 'image/png', warmup: 0.2, width: 160, exact: true },
+    });
+    assert.equal(result.error, undefined, JSON.stringify(result.error));
+    assert.deepEqual(result.asked, [{ video: { width: { exact: 160 } }, audio: false }]);
+    assert.deepEqual(result.magic, [0x89, 0x50, 0x4e, 0x47]);
+    assert.deepEqual(result.size, [160, 120]);
+    assert.ok(red(result.left), String(result.left));
+    assert.ok(blue(result.right), String(result.right));
+    assert.deepEqual(result.states, ['ended']);
+    assert.deepEqual(result.lines, []);
+  });
+
+  it('records the camera and the microphone as one WebM, and stops both', async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    await tab.enter();
+    const result = await tab.evaluate(film, {
+      options: { type: 'video/webm', duration: 0.6, microphone: true },
+      audio: true,
+    });
+    assert.equal(result.error, undefined, JSON.stringify(result.error));
+    assert.deepEqual(result.asked, [{ video: true, audio: true }]);
+    assert.deepEqual(result.magic, [0x1a, 0x45, 0xdf, 0xa3]);
+    assert.ok(result.bytes > 100, String(result.bytes));
+    assert.deepEqual(result.codecs.sort(), ['A_OPUS', 'V_VP9']);
+    assert.deepEqual(result.states, ['ended', 'ended']);
+    assert.deepEqual(result.lines, ['recording for 0.6 s…']);
+  });
+
+  it("lists the page's devices without asking", async (t) => {
+    const tab = await chrome.page(t);
+    await tab.goto('/');
+    const listed = await tab.evaluate(devices, {});
+    const rows = listed.split('\n');
+    assert.equal(rows.pop(), '');
+    const kinds = rows.map((row) => row.split('\t')[0]);
+    assert.deepEqual(kinds, [...kinds].sort().reverse());
+    for (const row of rows) assert.match(row, /^(video|audio)\t[\w+/=.-]*\t[^\t]*$/);
   });
 
   it('aborts during the delay, and stops the track', async (t) => {
