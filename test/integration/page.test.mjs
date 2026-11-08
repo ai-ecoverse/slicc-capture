@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import page, { create, handle, kinds } from '@ai-ecoverse/slicc-capture/page';
+import page, { create, handle, kinds, MAX_UNREAD } from '@ai-ecoverse/slicc-capture/page';
 import { boot } from './kernel.mjs';
 
 const picker = 'screencapture: waiting for the picker…\n';
@@ -509,6 +509,18 @@ async function bytes(path) {
   return new TextDecoder().decode(await os.kernel.readFile(path));
 }
 
+const MiB = 1024 * 1024;
+
+function chunk(size) {
+  return { size, arrayBuffer: async () => new ArrayBuffer(size) };
+}
+
+function emit(recorder, count) {
+  for (let i = 0; i < count; i += 1) recorder.ondataavailable({ data: chunk(MiB) });
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
 describe('the page module recording', () => {
   it('records for -V seconds, then stops every track', async () => {
     const state = studio();
@@ -792,6 +804,110 @@ describe('the page module recording', () => {
       );
     }
     assert.deepEqual(state.constraints, []);
+  });
+
+  it('errors a recording nobody reads past 64 MiB, and stops the recorder and every track', async () => {
+    const state = studio();
+    let recorder;
+    state.tape.start = (started) => {
+      recorder = started;
+    };
+    const reply = await state.page.handle({
+      options: { type: 'video/webm', system: true, microphone: true },
+      display: state.display,
+      userMedia: state.userMedia,
+    });
+    assert.equal(MAX_UNREAD, 64 * MiB);
+    emit(recorder, 64);
+    await settle();
+    assert.equal(recorder.state, 'recording');
+    assert.deepEqual(stopped(state), [0, 0]);
+    emit(recorder, 1);
+    await settle();
+    assert.equal(recorder.state, 'inactive');
+    assert.equal(recorder.stops, 1);
+    assert.deepEqual(stopped(state), [1, 1]);
+    assert.equal(state.tape.mic.tracks[0].stops, 1);
+    const [context] = state.tape.contexts;
+    assert.equal(context.closed, 1);
+    assert.equal(context.mixed.stops, 1);
+    await assert.rejects(reply.getReader().read(), {
+      name: 'Error',
+      message: 'the program reads too slowly',
+    });
+  });
+
+  it('never errors a recording far past 64 MiB for a reader that keeps up', async () => {
+    const state = studio();
+    let recorder;
+    state.tape.start = (started) => {
+      recorder = started;
+    };
+    const reply = await state.page.handle({
+      options: { type: 'video/webm' },
+      display: state.display,
+    });
+    const reader = reply.getReader();
+    let size = 0;
+    for (let i = 0; i < 200; i += 1) {
+      emit(recorder, 1);
+      await settle();
+      const { value } = await reader.read();
+      size += value.length;
+    }
+    recorder.stop();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+    }
+    assert.equal(size, 200 * MiB + 3);
+    assert.equal(recorder.stops, 1);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('frees what the program reads, so a slow reader that catches up never errors', async () => {
+    const state = studio();
+    let recorder;
+    state.tape.start = (started) => {
+      recorder = started;
+    };
+    const reply = await state.page.handle({
+      options: { type: 'video/webm' },
+      display: state.display,
+    });
+    const reader = reply.getReader();
+    let size = 0;
+    for (let round = 0; round < 3; round += 1) {
+      emit(recorder, 60);
+      await settle();
+      assert.equal(recorder.state, 'recording');
+      for (let i = 0; i < 60; i += 1) size += (await reader.read()).value.length;
+    }
+    recorder.stop();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+    }
+    assert.equal(size, 180 * MiB + 3);
+    assert.deepEqual(stopped(state), [1, 1]);
+  });
+
+  it('fails the command with the error of a chunk past 64 MiB', async () => {
+    const state = studio();
+    state.tape.start = (recorder) =>
+      setTimeout(() => recorder.ondataavailable({ data: chunk(MAX_UNREAD + 1) }), 10);
+    const result = await sh(
+      'rm -f v.webm; screencapture -v v.webm; echo "$?"; test -e v.webm || echo none'
+    );
+    assert.deepEqual(result, {
+      status: 0,
+      stdout: '1\nnone\n',
+      stderr: `${picker}screencapture: recording…\nscreencapture: the program reads too slowly\n`,
+    });
+    assert.equal(state.tape.recorders[0].state, 'inactive');
+    assert.deepEqual(stopped(state), [1, 1]);
   });
 
   it('stops when the reader cancels the reply', async () => {
