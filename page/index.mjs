@@ -13,6 +13,8 @@ const unsupported = 'screen capture is not supported in this browser';
 
 export const kinds = { 'capture.screen': {} };
 
+export const MAX_UNREAD = 64 * 1024 * 1024;
+
 function fail(name, message) {
   return new DOMException(message, name);
 }
@@ -254,7 +256,14 @@ function film({ env, stream, mic, track, type, duration, signal, progress }) {
       if (!blob?.size) return;
       queue = queue.then(async () => {
         const bytes = new Uint8Array(await blob.arrayBuffer());
-        if (!finished) controller.enqueue(bytes);
+        if (finished) return;
+        if (bytes.length > controller.desiredSize) {
+          end();
+          finish();
+          controller.error(new Error('the program reads too slowly'));
+          return;
+        }
+        controller.enqueue(bytes);
       });
     };
     recorder.onstop = () =>
@@ -282,13 +291,16 @@ function film({ env, stream, mic, track, type, duration, signal, progress }) {
   };
   try {
     recorder = new (env('MediaRecorder'))(new (env('MediaStream'))(mixer.tracks), { mimeType });
-    return new ReadableStream({
-      start,
-      cancel() {
-        end();
-        finish();
+    return new ReadableStream(
+      {
+        start,
+        cancel() {
+          end();
+          finish();
+        },
       },
-    });
+      new ByteLengthQueuingStrategy({ highWaterMark: MAX_UNREAD })
+    );
   } catch (error) {
     finished = true;
     mixer.close();
