@@ -115,7 +115,11 @@ function refusal(name, message) {
 
 describe('the page module', () => {
   it('exports kinds, handle and a default of both', () => {
-    assert.deepEqual(kinds, { 'capture.screen': {} });
+    assert.deepEqual(kinds, {
+      'capture.screen': {},
+      'capture.camera': {},
+      'capture.devices': {},
+    });
     assert.equal(page.kinds, kinds);
     assert.equal(page.handle, handle);
     assert.equal(typeof create, 'function');
@@ -781,6 +785,13 @@ describe('the page module recording', () => {
       [{ system: 'yes' }, 'invalid system: "yes"'],
       [{ microphone: '' }, 'invalid microphone: ""'],
       [{ microphone: 1 }, 'invalid microphone: 1'],
+      [{ microphone: 'a b' }, 'invalid microphone: "a b"'],
+      [{ microphone: 'mic\u001b[2J' }, 'invalid microphone'],
+      [{ duration: 2147484 }, 'invalid duration: 2147484'],
+      [{ delay: 1e10 }, 'invalid delay: 10000000000'],
+      [{ cursor: 'x'.repeat(70) }, 'invalid cursor'],
+      [{ rect: { x: -1, y: 0, width: 1, height: 1, '\u202e': 1 } }, 'invalid rect'],
+      [{ surface: 'tab\u2028' }, 'invalid surface'],
     ];
     for (const [options, message] of cases) {
       await assert.rejects(
@@ -796,6 +807,17 @@ describe('the page module recording', () => {
       }),
       { name: 'NotSupportedError', message: 'rect: not with video' }
     );
+    for (const [type, message] of [
+      [7, 'invalid type: 7'],
+      ['image/png\n', 'invalid type'],
+      ['', 'invalid type: ""'],
+    ]) {
+      await assert.rejects(
+        state.page.handle({ options: { type }, display }),
+        { name: 'TypeError', message },
+        message
+      );
+    }
     for (const type of ['toString', 'constructor', '__proto__']) {
       await assert.rejects(
         state.page.handle({ options: { type }, display }),

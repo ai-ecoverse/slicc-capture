@@ -10,8 +10,14 @@ const voiced = {
 const cursors = ['always', 'motion', 'never'];
 const surfaces = ['monitor', 'window', 'browser'];
 const unsupported = 'screen capture is not supported in this browser';
+const blind = 'camera capture is not supported in this browser';
+const longest = 2147483;
+const ids = /^[\w+/=.-]{1,256}$/;
+const unprintable = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const pseudo = ['default', 'communications'];
+const named = { deviceId: 'device', width: 'width', height: 'height', frameRate: 'frameRate' };
 
-export const kinds = { 'capture.screen': {} };
+export const kinds = { 'capture.screen': {}, 'capture.camera': {}, 'capture.devices': {} };
 
 export const MAX_UNREAD = 64 * 1024 * 1024;
 
@@ -48,59 +54,114 @@ function stopAll(stream) {
   for (const track of stream?.getTracks?.() ?? []) track.stop();
 }
 
+function shown(value) {
+  let dirty = false;
+  const text = JSON.stringify(value, (key, item) => {
+    if (unprintable.test(key) || (typeof item === 'string' && unprintable.test(item))) dirty = true;
+    return item;
+  });
+  return dirty || text === undefined || text.length > 64 ? '' : `: ${text}`;
+}
+
 function invalid(field, value) {
-  return new TypeError(`invalid ${field}: ${JSON.stringify(value)}`);
+  return new TypeError(`invalid ${field}${shown(value)}`);
 }
 
 const whole = (value, least) => Number.isInteger(value) && value >= least;
+const seconds = (value) => Number.isFinite(value) && value >= 0 && value <= longest;
+const flag = (value) => typeof value === 'boolean';
+const device = (value) => typeof value === 'string' && ids.test(value);
+const size = (value) => whole(value, 1) && value <= 16384;
 
-const checks = {
+const shared = {
   quality: (value) => typeof value === 'number' && value >= 0 && value <= 1,
-  cursor: (value) => cursors.includes(value),
-  surface: (value) => surfaces.includes(value),
-  delay: (value) => Number.isFinite(value) && value >= 0,
-  rect: (value) =>
-    whole(value?.x, 0) && whole(value?.y, 0) && whole(value?.width, 1) && whole(value?.height, 1),
-  duration: (value) => Number.isFinite(value) && value > 0,
-  system: (value) => typeof value === 'boolean',
-  microphone: (value) => typeof value === 'boolean' || (typeof value === 'string' && value !== ''),
+  duration: (value) => seconds(value) && value > 0,
+  microphone: (value) => flag(value) || device(value),
 };
 
-function parse(options = {}) {
-  const { type = 'image/png', quality, cursor, surface, delay, rect } = options;
-  const { duration, system, microphone } = options;
+const screens = {
+  ...shared,
+  cursor: (value) => cursors.includes(value),
+  surface: (value) => surfaces.includes(value),
+  delay: seconds,
+  rect: (value) =>
+    whole(value?.x, 0) && whole(value?.y, 0) && whole(value?.width, 1) && whole(value?.height, 1),
+  system: flag,
+};
+
+const cameras = {
+  ...shared,
+  device,
+  width: size,
+  height: size,
+  frameRate: (value) => Number.isFinite(value) && value > 0 && value <= 1000,
+  exact: flag,
+  warmup: seconds,
+};
+
+function check(options, fields) {
+  const { type = 'image/png', quality, duration } = options;
+  if (typeof type !== 'string' || !/^[\x20-\x7e]{1,64}$/.test(type)) throw invalid('type', type);
   const video = Object.hasOwn(movies, type);
   if (!types.includes(type) && !video) {
     throw fail('NotSupportedError', `unsupported type: ${type}`);
   }
-  for (const [field, valid] of Object.entries(checks)) {
+  for (const [field, valid] of Object.entries(fields)) {
     if (options[field] !== undefined && !valid(options[field]))
       throw invalid(field, options[field]);
   }
-  if (video && rect !== undefined) throw fail('NotSupportedError', 'rect: not with video');
+  return { type, quality, video, duration };
+}
+
+function screen(options = {}) {
+  const request = check(options, screens);
+  const { cursor, surface, delay, rect, system, microphone } = options;
+  if (request.video && rect !== undefined) throw fail('NotSupportedError', 'rect: not with video');
   const track = {};
   if (cursor !== undefined) track.cursor = cursor;
   if (surface !== undefined) track.displaySurface = surface;
+  const audio = Boolean(request.video && system);
   return {
-    constraints: { video: track, audio: Boolean(video && system) },
-    type,
-    quality,
+    ...request,
+    constraints: { video: track, audio },
     delay: delay ?? 0,
+    say: true,
     rect,
-    video,
-    duration,
-    microphone: video && microphone ? microphone : undefined,
+    system: audio,
+    microphone: request.video && microphone ? microphone : undefined,
   };
 }
 
-async function pick(display, constraints, signal, timeout) {
-  const pending = Promise.resolve().then(() => display(constraints));
+function camera(options = {}) {
+  const request = check(options, cameras);
+  const { device, exact, warmup = 1.5, microphone } = options;
+  const mode = exact ? 'exact' : 'ideal';
+  const track = {};
+  if (device !== undefined) track.deviceId = { exact: device };
+  for (const field of ['width', 'height', 'frameRate']) {
+    if (options[field] !== undefined) track[field] = { [mode]: options[field] };
+  }
+  let audio = false;
+  if (request.video && microphone) {
+    audio = microphone === true ? true : { deviceId: { exact: microphone } };
+  }
+  return {
+    ...request,
+    constraints: { video: Object.keys(track).length > 0 ? track : true, audio },
+    delay: request.video ? 0 : warmup,
+  };
+}
+
+async function ask(source, constraints, signal, timeout) {
+  const pending = Promise.resolve().then(() => source(constraints));
   let timer;
   const late = new Promise((_, reject) => {
-    timer = setTimeout(
-      () => reject(fail('TimeoutError', 'timed out waiting for the picker')),
-      timeout
-    );
+    if (timeout) {
+      timer = setTimeout(
+        () => reject(fail('TimeoutError', 'timed out waiting for the picker')),
+        timeout
+      );
+    }
   });
   try {
     return await race(Promise.race([pending, late]), signal);
@@ -204,28 +265,18 @@ function mix(env, track, audio) {
   }
 }
 
-function supported(request, display, userMedia, env) {
-  if (typeof display !== 'function') throw fail('NotSupportedError', unsupported);
-  if (request.microphone && typeof userMedia !== 'function') {
-    throw fail('NotSupportedError', 'this page does not record the microphone');
-  }
+function browser(request, env, message) {
   if (request.video) {
-    if (!env('MediaRecorder') || !env('MediaStream')) throw fail('NotSupportedError', unsupported);
+    if (!env('MediaRecorder') || !env('MediaStream')) throw fail('NotSupportedError', message);
     choose(env, request.type, false);
   } else if (!env('OffscreenCanvas') || !(env('ImageCapture') || env('document'))) {
-    throw fail('NotSupportedError', unsupported);
+    throw fail('NotSupportedError', message);
   }
 }
 
-async function listen(userMedia, microphone, signal) {
+function listen(userMedia, microphone, signal) {
   const audio = microphone === true ? true : { deviceId: { exact: microphone } };
-  const pending = Promise.resolve().then(() => userMedia({ audio, video: false }));
-  try {
-    return await race(pending, signal);
-  } catch (error) {
-    pending.then(stopAll, () => {});
-    throw error;
-  }
+  return ask(userMedia, { audio, video: false }, signal);
 }
 
 function film({ env, stream, mic, track, type, duration, signal, progress }) {
@@ -308,19 +359,55 @@ function film({ env, stream, mic, track, type, duration, signal, progress }) {
   }
 }
 
+function explain(error, audio) {
+  if (error?.name === 'NotFoundError') {
+    return fail('NotFoundError', audio ? 'no camera or microphone' : 'no camera');
+  }
+  if (error?.name === 'OverconstrainedError') {
+    const name = String(error.constraint ?? '');
+    const field = Object.hasOwn(named, name) ? named[name] : 'constraints';
+    return fail('NotSupportedError', `no camera matches the ${field} asked for`);
+  }
+  return error;
+}
+
+const label = (value) => String(value ?? '').replace(new RegExp(unprintable, 'gu'), ' ');
+
+async function list(devices, env, signal) {
+  let enumerate = devices;
+  if (typeof enumerate !== 'function') {
+    const media = env('navigator')?.mediaDevices;
+    if (typeof media?.enumerateDevices !== 'function') {
+      throw fail('NotSupportedError', 'this page does not list devices');
+    }
+    enumerate = () => media.enumerateDevices();
+  }
+  const found = (await race(Promise.resolve().then(enumerate), signal)) ?? [];
+  const rows = [];
+  for (const [kind, name] of [
+    ['videoinput', 'video'],
+    ['audioinput', 'audio'],
+  ]) {
+    for (const one of found) {
+      const id = one?.deviceId ?? '';
+      if (
+        one?.kind !== kind ||
+        typeof id !== 'string' ||
+        pseudo.includes(id) ||
+        (id && !ids.test(id))
+      )
+        continue;
+      rows.push(`${name}\t${id}\t${label(one.label)}\n`);
+    }
+  }
+  return rows.join('');
+}
+
 export function create(overrides = {}) {
   const env = (name) => (name in overrides ? overrides[name] : globalThis[name]);
   const timeout = overrides.timeout ?? 300000;
 
-  async function handle({
-    options,
-    signal = new AbortController().signal,
-    progress = () => {},
-    display,
-    userMedia,
-  }) {
-    const request = parse(options);
-    supported(request, display, userMedia, env);
+  async function shoot(request, open, words, { signal, progress, userMedia }) {
     const local = new AbortController();
     const forward = () => local.abort(signal.reason);
     if (signal.aborted) forward();
@@ -331,24 +418,19 @@ export function create(overrides = {}) {
     let keep = false;
     try {
       if (local.signal.aborted) throw aborted(local.signal);
-      progress('waiting for the picker…');
-      stream = await pick(display, request.constraints, local.signal, timeout);
+      stream = await open(local.signal);
       const track = stream?.getVideoTracks?.()[0];
-      if (!track) throw fail('NotFoundError', 'the capture has no video track');
-      if (track.readyState === 'ended') throw fail('AbortError', 'the capture was stopped');
-      track.addEventListener(
-        'ended',
-        () => local.abort(fail('AbortError', 'the capture was stopped')),
-        {
-          once: true,
-        }
-      );
+      if (!track) throw fail('NotFoundError', words.missing);
+      if (track.readyState === 'ended') throw fail('AbortError', words.stopped);
+      track.addEventListener('ended', () => local.abort(fail('AbortError', words.stopped)), {
+        once: true,
+      });
       if (request.delay > 0) {
-        progress(`waiting ${request.delay} s…`);
+        if (request.say) progress(`waiting ${request.delay} s…`);
         await sleep(request.delay * 1000, local.signal);
       }
       if (request.video) {
-        if (request.constraints.audio && !audible(stream).length) progress('no audio was shared');
+        if (request.system && !audible(stream).length) progress('no audio was shared');
         if (request.microphone) mic = await listen(userMedia, request.microphone, local.signal);
         const { type, duration } = request;
         const reply = film({ env, stream, mic, track, type, duration, signal, progress });
@@ -365,6 +447,58 @@ export function create(overrides = {}) {
         stopAll(mic);
       }
     }
+  }
+
+  function onScreen(options, context) {
+    const request = screen(options);
+    if (typeof context.display !== 'function') throw fail('NotSupportedError', unsupported);
+    if (request.microphone && typeof context.userMedia !== 'function') {
+      throw fail('NotSupportedError', 'this page does not record the microphone');
+    }
+    browser(request, env, unsupported);
+    const open = (signal) => {
+      context.progress('waiting for the picker…');
+      return ask(context.display, request.constraints, signal, timeout);
+    };
+    const words = { missing: 'the capture has no video track', stopped: 'the capture was stopped' };
+    return shoot(request, open, words, context);
+  }
+
+  function onCamera(options, context) {
+    const request = camera(options);
+    if (typeof context.userMedia !== 'function') {
+      throw fail('NotSupportedError', 'this page does not record the camera');
+    }
+    browser(request, env, blind);
+    const open = async (signal) => {
+      try {
+        return await ask(context.userMedia, request.constraints, signal);
+      } catch (error) {
+        throw explain(error, request.constraints.audio);
+      }
+    };
+    return shoot(
+      request,
+      open,
+      { missing: 'no camera', stopped: 'the camera was stopped' },
+      context
+    );
+  }
+
+  async function handle({
+    kind = 'capture.screen',
+    options,
+    signal = new AbortController().signal,
+    progress = () => {},
+    display,
+    userMedia,
+    devices,
+  }) {
+    const context = { signal, progress, display, userMedia };
+    if (kind === 'capture.screen') return onScreen(options, context);
+    if (kind === 'capture.camera') return onCamera(options, context);
+    if (kind === 'capture.devices') return list(devices, env, signal);
+    throw fail('NotSupportedError', `unsupported kind${shown(kind)}`);
   }
 
   return { kinds, handle };
